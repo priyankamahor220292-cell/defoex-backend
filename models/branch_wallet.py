@@ -29,7 +29,15 @@ class WalletTransaction(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
-    transaction_type = db.Column(db.Enum('TopUp', 'Deduction', 'CashIn'), nullable=False)
+    ttransaction_type = db.Column(
+    db.Enum(
+        'TopUp',
+        'Deduction',
+        'CashIn',
+        name='wallet_transaction_type_enum'
+    ),
+    nullable=False
+)
     amount = db.Column(db.Numeric(15, 2), nullable=False)
     description = db.Column(db.String(255))
     reference_id = db.Column(db.String(50))  # investment IRN or topup reference

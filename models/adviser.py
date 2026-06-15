@@ -28,13 +28,13 @@ class Adviser(db.Model):
     __tablename__ = 'advisers'
 
     id = db.Column(db.Integer, primary_key=True)
-    adviser_code = db.Column(db.String(20), unique=True, nullable=False)
+    adviser_code = db.Column(db.String(30), unique=True, nullable=False)
     full_name = db.Column(db.String(200), nullable=False)
     mobile = db.Column(db.String(15), unique=True, nullable=False)
     email = db.Column(db.String(150))
     rank_id = db.Column(db.Integer, default=1)  # 1=SR ... 20=House8
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
-    parent_adviser_code = db.Column(db.String(20), nullable=True)  # upline adviser
+    parent_adviser_code = db.Column(db.String(30), nullable=True)  # upline adviser
     is_company_owner = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)

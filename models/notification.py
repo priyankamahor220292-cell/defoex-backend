@@ -9,7 +9,16 @@ class Notification(db.Model):
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     title = db.Column(db.String(200), nullable=False)
     message = db.Column(db.Text)
-    notification_type = db.Column(db.Enum('Info', 'Warning', 'Success', 'Error'), default='Info')
+    notification_type = db.Column(
+    db.Enum(
+        'Info',
+        'Warning',
+        'Success',
+        'Error',
+        name='notification_type_enum'
+    ),
+    default='Info'
+)
     is_read = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 

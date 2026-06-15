@@ -290,3 +290,56 @@ def list_plans():
         'pages': paginated.pages,
         'current_page': paginated.page
     })[0]), 200
+
+
+@investment_plan_bp.route('/receipt/<irn>', methods=['GET'])
+@jwt_required()
+def get_receipt(irn):
+    """Full receipt data for printing — Branch Manager and Superadmin only"""
+    claims = get_jwt()
+    role = claims.get('role')
+    if role not in ['branchmanager', 'superadmin']:
+        return jsonify(error_response('Only Branch Manager can print receipts', 403)[0]), 403
+
+    investment = Investment.query.filter_by(irn=irn).first()
+    if not investment:
+        return jsonify(error_response('IRN not found', 404)[0]), 404
+
+    member = Member.query.filter_by(investor_id=investment.investor_id).first()
+
+    # Count actual paid installments from installments table
+    from models.investment import Installment
+    paid_count = Installment.query.filter_by(
+        investment_id=investment.id,
+        status='Paid'
+    ).count()
+
+    # Update investment record if count differs
+    if investment.installments_paid != paid_count:
+        investment.installments_paid = paid_count
+        db.session.commit()
+
+    # Get adviser info
+    adviser = None
+    if investment.adviser_code:
+        adv = Adviser.query.filter_by(adviser_code=investment.adviser_code).first()
+        if adv:
+            adviser = adv.to_dict()
+
+    total = investment.total_installments or 0
+    paid  = paid_count
+    remaining = total - paid
+
+    return jsonify(success_response({
+        'irn':              investment.irn,
+        'investor':         member.to_dict() if member else None,
+        'investment':       investment.to_dict(),
+        'adviser':          adviser,
+        'installments_paid': paid,
+        'total_installments': total,
+        'remaining_installments': remaining,
+        'status_label':     f'Installment {paid} of {total}',
+        'completion_pct':   round((paid / total * 100), 1) if total else 0,
+        'printed_by_role':  role,
+        'printed_at':       datetime.utcnow().isoformat(),
+    })[0]), 200

@@ -8,12 +8,11 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
-    # Init extensions
     db.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
 
-    # CORS — allow all origins in dev (restrict in prod)
+    # CORS
     CORS(app,
          resources={r"/api/*": {"origins": "*"}},
          supports_credentials=True,
@@ -21,15 +20,15 @@ def create_app():
          methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
     # Register blueprints
-    from routes.auth import auth_bp
-    from routes.registration import registration_bp
+    from routes.auth           import auth_bp
+    from routes.registration   import registration_bp
     from routes.investment_plan import investment_plan_bp
-    from routes.reports_v4 import reports_v4_bp
-    from routes.branches import branches_bp
-    from routes.advisers import advisers_bp
-    from routes.commissions import commissions_bp
-    from routes.notifications import notifications_bp
-    from routes.users import users_bp
+    from routes.reports_v4     import reports_v4_bp
+    from routes.branches        import branches_bp
+    from routes.advisers        import advisers_bp
+    from routes.commissions     import commissions_bp
+    from routes.notifications   import notifications_bp
+    from routes.users           import users_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(registration_bp)
@@ -54,25 +53,29 @@ def create_app():
     def missing_token_callback(error):
         return jsonify({'success': False, 'message': 'Authorization token required'}), 401
 
-    # Health check
     @app.route('/health')
     def health():
-        return jsonify({'status': 'ok', 'app': 'DefOex IntraTech API v1.0'})
+        return jsonify({'status': 'ok', 'app': 'DefOex IntraTech API v1.0', 'db': 'PostgreSQL'})
 
-    # Create tables + seed on first run
+    # Create tables and seed only if tables are empty
     with app.app_context():
-        db.create_all()
-        from models.user import User
-        if not User.query.first():
+        try:
+            db.create_all()
+            from models.user import User
             try:
-                from utils.seed import seed_database
-                seed_database()
-            except Exception as e:
-                print(f"Seed error: {e}")
+                if not User.query.first():
+                    from utils.seed import seed_database
+                    seed_database()
+            except Exception:
+                # Tables may need reset — run reset_db.py
+                pass
+        except Exception as e:
+            print(f"DB init note: {e}")
+            print("If this is a schema error, run: python reset_db.py")
 
     return app
 
 
 if __name__ == '__main__':
     app = create_app()
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    app.run(debug=True, host="0.0.0.0", port=5001)

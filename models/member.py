@@ -5,7 +5,7 @@ class Member(db.Model):
     __tablename__ = 'members'
 
     id = db.Column(db.Integer, primary_key=True)
-    investor_id = db.Column(db.String(20), unique=True, nullable=False)
+    investor_id = db.Column(db.String(30), unique=True, nullable=False)
 
     # Personal Info
     salutation = db.Column(db.String(10))  # Mr/Mrs/Ms/Dr
@@ -13,8 +13,23 @@ class Member(db.Model):
     father_spouse_name = db.Column(db.String(200))
     date_of_birth = db.Column(db.Date)
     age = db.Column(db.Integer)
-    gender = db.Column(db.Enum('Male', 'Female', 'Other'))
-    marital_status = db.Column(db.Enum('Single', 'Married', 'Divorced', 'Widowed'))
+    gender = db.Column(
+    db.Enum(
+        'Male',
+        'Female',
+        'Other',
+        name='member_gender_enum'
+    )
+)
+    marital_status = db.Column(
+    db.Enum(
+        'Single',
+        'Married',
+        'Divorced',
+        'Widowed',
+        name='member_marital_status_enum'
+    )
+)
     nationality = db.Column(db.String(50), default='Indian')
     mobile = db.Column(db.String(15), unique=True, nullable=False)
     phone_office = db.Column(db.String(15))
@@ -69,12 +84,29 @@ class Member(db.Model):
     family_income = db.Column(db.Numeric(15, 2))
 
     # Registration Info
-    adviser_code = db.Column(db.String(20), nullable=False)
+    adviser_code = db.Column(db.String(30), nullable=False)
     promoter_post = db.Column(db.String(100))
-    member_type = db.Column(db.Enum('Customer', 'Promoter Member'), default='Customer')
+    member_type = db.Column(
+    db.Enum(
+        'Customer',
+        'Promoter Member',
+        name='member_type_enum'
+    ),
+    default='Customer'
+)
     member_fees = db.Column(db.Numeric(10, 2), default=10)
     promoter_fees = db.Column(db.Numeric(10, 2), default=0)
-    payment_mode = db.Column(db.Enum('Cash', 'Cheque', 'DD', 'UPI', 'NEFT'), default='Cash')
+    payment_mode = db.Column(
+    db.Enum(
+        'Cash',
+        'Cheque',
+        'DD',
+        'UPI',
+        'NEFT',
+        name='investment_payment_mode_enum'
+    ),
+    default='Cash'
+)
     cheque_dd_details = db.Column(db.String(100))
     cheque_dd_date = db.Column(db.Date)
     reg_bank_name = db.Column(db.String(100))
@@ -83,7 +115,15 @@ class Member(db.Model):
 
     # Status
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'))
-    approval_status = db.Column(db.Enum('Pending', 'Approved', 'Rejected'), default='Pending')
+    approval_status = db.Column(
+    db.Enum(
+        'Pending',
+        'Approved',
+        'Rejected',
+        name='member_approval_status_enum'
+    ),
+    default='Pending'
+)
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     approved_at = db.Column(db.DateTime, nullable=True)
     is_active = db.Column(db.Boolean, default=True)
