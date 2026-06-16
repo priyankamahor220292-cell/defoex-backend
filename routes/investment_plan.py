@@ -103,10 +103,24 @@ def create_plan():
     except (TypeError, ValueError):
         return jsonify(error_response('monthly_amount must be a positive number')[0]), 400
 
-    # Validate investor
+    # Validate investor — try exact match first, then fallback formats
     member = Member.query.filter_by(investor_id=investor_id, approval_status='Approved').first()
+
+    # Try old format fallback: INV2026091192 → DFX-2026-091192 style
+    if not member and not investor_id.startswith('DFX-'):
+        # Try searching by mobile or partial match
+        member = Member.query.filter(
+            Member.investor_id.ilike(f'%{investor_id[-6:]}%'),
+            Member.approval_status == 'Approved'
+        ).first()
+
     if not member:
-        return jsonify(error_response('Investor not found or not yet approved')[0]), 404
+        # Show available investor IDs to help debug
+        sample = [m.investor_id for m in Member.query.filter_by(approval_status='Approved').limit(5).all()]
+        hint = f' Available IDs: {", ".join(sample)}' if sample else ' No approved investors found.'
+        return jsonify(error_response(
+            f'Investor "{investor_id}" not found or not yet approved.{hint}'
+        )[0]), 404
 
     # Resolve branch_id — BM gets it from JWT, superadmin gets it from investor's branch
     branch_id = resolve_branch_id(claims, data)
