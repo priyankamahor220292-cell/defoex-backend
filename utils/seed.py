@@ -1,12 +1,16 @@
 from extensions import db
 from models.user import User
 from models.branch import Branch
-from models.branch_wallet import BranchWallet
+from models.branch_wallet import BranchWallet, AdminWallet, ADMIN_WALLET_LIMIT
 from models.adviser import Adviser
+
+ADMIN_LIMIT = 1_00_00_00_000  # ₹100 Crore — superadmin panel limit
 
 
 def seed_database():
     """Seed default superadmin + head office branch + company owner adviser"""
+
+    branch_id = None
 
     # Head Office branch
     if not Branch.query.filter_by(branch_code='HQ001').first():
@@ -22,9 +26,14 @@ def seed_database():
         )
         db.session.add(branch)
         db.session.flush()
+        branch_id = branch.id
+
+        # Admin wallet — 100 Crore limit
         wallet = BranchWallet(
-            branch_id=branch.id, current_balance=0,
-            cash_wallet=0, low_balance_threshold=10000
+            branch_id         = branch.id,
+            current_balance   = ADMIN_LIMIT,
+            cash_wallet       = 0,
+            low_balance_threshold = 10_00_000,  # Alert at ₹10 Lakh
         )
         db.session.add(wallet)
 
@@ -41,7 +50,7 @@ def seed_database():
         admin.set_password('Defoex@2024')
         db.session.add(admin)
 
-    # Company owner adviser — uses new unified ID format
+    # Company owner adviser
     if not Adviser.query.filter_by(adviser_code='DFX-2026-000001').first():
         owner = Adviser(
             adviser_code     = 'DFX-2026-000001',
@@ -55,5 +64,6 @@ def seed_database():
         db.session.add(owner)
 
     db.session.commit()
-    print("✅ Database seeded: superadmin / Defoex@2024")
-    print("   Adviser code: DFX-2026-000001 (Company Owner)")
+    print("✅ Seeded: superadmin / Defoex@2024")
+    print(f"   Admin wallet limit: ₹{ADMIN_LIMIT:,} (100 Crore)")
+    print("   Adviser: DFX-2026-000001 (Company Owner)")

@@ -61,14 +61,22 @@ def create_app():
     with app.app_context():
         try:
             db.create_all()
-            from models.user import User
+            # Import ALL models so db.create_all() creates every table
+            from models.user          import User
+            from models.branch        import Branch
+            from models.member        import Member
+            from models.adviser       import Adviser
+            from models.investment    import Investment, Installment
+            from models.branch_wallet import BranchWallet, WalletTransaction, AdminWallet
+            from models.commission    import Commission
+            from models.notification  import Notification
+
             try:
                 if not User.query.first():
                     from utils.seed import seed_database
                     seed_database()
             except Exception:
-                # Tables may need reset — run reset_db.py
-                pass
+                pass  # Run reset_db.py to recreate tables
         except Exception as e:
             print(f"DB init note: {e}")
             print("If this is a schema error, run: python reset_db.py")

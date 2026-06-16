@@ -192,3 +192,83 @@ def list_investors():
     except Exception as e:
         print("list_investors error:", traceback.format_exc())
         return jsonify(error_response(f'List error: {str(e)}')[0]), 500
+
+
+@reports_v4_bp.route('/search', methods=['GET'])
+@jwt_required()
+def global_search():
+    """
+    Universal search across investors, investment plans, and advisers.
+    Search by: IRN, Investor ID, Investor Name, Mobile, Adviser Code
+    """
+    try:
+        claims    = get_jwt()
+        branch_id = claims.get('branch_id') if claims.get('role') == 'branchmanager' else None
+        query     = request.args.get('q', '').strip()
+        search_by = request.args.get('by', 'all')   # irn | investor | adviser | mobile | all
+
+        if not query or len(query) < 2:
+            return jsonify(error_response('Enter at least 2 characters')[0]), 400
+
+        results = {'investors': [], 'investments': [], 'advisers': []}
+        q_like  = f'%{query}%'
+
+        # ── Search Investments by IRN ─────────────────────────────
+        if search_by in ('irn', 'all'):
+            inv_q = Investment.query.filter(Investment.irn.ilike(q_like))
+            if branch_id:
+                inv_q = inv_q.filter_by(branch_id=branch_id)
+            for inv in inv_q.limit(10).all():
+                member = Member.query.filter_by(investor_id=inv.investor_id).first()
+                results['investments'].append({
+                    **inv.to_dict(),
+                    'investor_name': member.full_name if member else None,
+                    'investor_mobile': member.mobile if member else None,
+                })
+
+        # ── Search Investors by ID, Name, Mobile ─────────────────
+        if search_by in ('investor', 'mobile', 'all'):
+            mem_q = Member.query.filter(
+                db.or_(
+                    Member.investor_id.ilike(q_like),
+                    Member.full_name.ilike(q_like),
+                    Member.mobile.ilike(q_like),
+                    Member.aadhar_number.ilike(q_like),
+                )
+            )
+            if branch_id:
+                mem_q = mem_q.filter_by(branch_id=branch_id)
+            for m in mem_q.limit(10).all():
+                inv_count = Investment.query.filter_by(
+                    investor_id=m.investor_id, approval_status='Approved'
+                ).count()
+                d = m.to_dict()
+                d['plan_count'] = inv_count
+                d['status'] = 'Active' if inv_count > 0 else 'Not Active'
+                results['investors'].append(d)
+
+        # ── Search Advisers ───────────────────────────────────────
+        if search_by in ('adviser', 'all'):
+            from models.adviser import Adviser
+            adv_q = Adviser.query.filter(
+                db.or_(
+                    Adviser.adviser_code.ilike(q_like),
+                    Adviser.full_name.ilike(q_like),
+                    Adviser.mobile.ilike(q_like),
+                )
+            )
+            if branch_id:
+                adv_q = adv_q.filter_by(branch_id=branch_id)
+            results['advisers'] = [a.to_dict() for a in adv_q.limit(10).all()]
+
+        total = sum(len(v) for v in results.values())
+        return jsonify(success_response({
+            'query':   query,
+            'search_by': search_by,
+            'total':   total,
+            **results,
+        })[0]), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify(error_response(f'Search failed: {str(e)}')[0]), 500
