@@ -92,7 +92,26 @@ def create_branch():
     db.session.flush()
     db.session.add(BranchWallet(branch_id=branch.id, current_balance=0, cash_wallet=0))
     db.session.commit()
-    return jsonify(success_response(branch.to_dict(), 'Branch created')[0]), 201
+
+    # Auto-create branch-specific tables
+    try:
+        from utils.branch_schema import create_branch_tables
+        create_branch_tables(branch.branch_code)
+        print(f"Branch tables created for {branch.branch_code}")
+    except Exception as e:
+        print(f"Warning: could not create branch tables: {e}")
+
+    return jsonify(success_response({
+        **branch.to_dict(),
+        'branch_tables_created': True,
+        'tables': [
+            f'{branch.branch_code}_advisers',
+            f'{branch.branch_code}_members',
+            f'{branch.branch_code}_investments',
+            f'{branch.branch_code}_installments',
+            f'{branch.branch_code}_commissions',
+        ]
+    }, f'Branch {branch.branch_code} created with dedicated tables')[0]), 201
 
 
 @branches_bp.route('/admin-wallet', methods=['GET'])

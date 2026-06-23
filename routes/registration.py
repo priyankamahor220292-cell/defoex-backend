@@ -154,7 +154,7 @@ def new_registration():
             family_income    = safe_decimal(data.get('family_income')),
             adviser_code     = str(data['adviser_code']).strip(),
             promoter_post    = data.get('promoter_post') or None,
-            member_type      = safe_enum(data.get('member_type'), ['Customer','Promoter Member'], 'Customer'),
+            member_type      = safe_enum(data.get('member_type', 'Investor'), ['Investor','Customer','Promoter Member'], 'Investor'),
             member_fees      = safe_decimal(data.get('member_fees')) or 10,
             promoter_fees    = safe_decimal(data.get('promoter_fees')) or 0,
             payment_mode     = safe_enum(data.get('payment_mode'), ['Cash','Cheque','DD','UPI','NEFT'], 'Cash'),
@@ -192,7 +192,70 @@ def approve_registration(member_id):
         member.approval_status = 'Approved'
         member.approved_by     = int(identity)
         member.approved_at     = datetime.utcnow()
-        msg = f'Registration approved for {member.full_name}'
+
+        # Generate investor login credentials
+        import secrets
+        from models.user import User
+        inv_year = datetime.utcnow().year
+        inv_seq  = User.query.count() + 1
+        username = f"DEFIN{inv_year}{str(inv_seq).zfill(2)}"
+        password = secrets.token_hex(5)   # 10-char hex
+        while User.query.filter_by(username=username).first():
+            inv_seq += 1
+            username = f"DEFIN{inv_year}{str(inv_seq).zfill(2)}"
+        inv_user = User(
+            username  = username,
+            email     = member.email or f"{username.lower()}@defoex.com",
+            full_name = member.full_name,
+            mobile    = member.mobile,
+            role      = 'member',
+            branch_id = member.branch_id,
+            is_active = True,
+        )
+        inv_user.set_password(password)
+        try:
+            db.session.add(inv_user)
+            db.session.flush()  # test for unique constraint before commit
+        except Exception as ue:
+            db.session.rollback()
+            # Mobile already in users — still approve, just skip user creation
+            print(f"User create skip (mobile exists): {ue}")
+            creds = {'username': 'N/A (mobile exists)', 'password': 'N/A'}
+            member.approval_status = 'Approved'
+            member.approved_by     = int(identity)
+            member.approved_at     = datetime.utcnow()
+            db.session.commit()
+            return jsonify(success_response(member.to_dict(), f'Approved — mobile already has a user account')[0]), 200
+
+        # Deduct member fees (₹10 for investor) from branch wallet on approval
+        fees = float(member.member_fees or 10)
+        if member.branch_id and fees > 0:
+            from models.branch_wallet import BranchWallet, WalletTransaction
+            wallet = BranchWallet.query.filter_by(branch_id=member.branch_id).first()
+            if wallet and float(wallet.current_balance or 0) >= fees:
+                wallet.current_balance = float(wallet.current_balance or 0) - fees
+                wallet.cash_wallet     = float(wallet.cash_wallet or 0) + fees
+                try:
+                    from sqlalchemy import text
+                    db.session.execute(text("""
+                        INSERT INTO wallet_transactions
+                        (branch_id, transaction_type, amount, description,
+                         balance_after, cash_wallet_after, created_by, created_at)
+                        VALUES (:bid, :ttype, :amt, :desc, :bal, :cash, :by, NOW())
+                    """), {
+                        'bid':   member.branch_id,
+                        'ttype': 'Deduction',
+                        'amt':   fees,
+                        'desc':  f'Member registration fee — {member.full_name} ({member.investor_id})',
+                        'bal':   float(wallet.current_balance),
+                        'cash':  float(wallet.cash_wallet),
+                        'by':    int(identity),
+                    })
+                except Exception as e:
+                    print(f"Wallet txn error (non-critical): {e}")
+
+        msg = f'Registration approved for {member.full_name} — ₹{fees:.0f} deducted from branch wallet'
+        creds = {'username': username, 'password': password}
     elif action == 'reject':
         member.approval_status = 'Rejected'
         msg = f'Registration rejected for {member.full_name}'
@@ -200,7 +263,11 @@ def approve_registration(member_id):
         return jsonify(error_response('Invalid action. Use approve or reject')[0]), 400
 
     db.session.commit()
-    return jsonify(success_response(member.to_dict(), msg)[0]), 200
+    resp = member.to_dict()
+    if action == 'approve' and 'creds' in dir():
+        resp['credentials'] = creds
+        resp['credentials']['message'] = f'Congratulations Investor Created! Username: {creds["username"]} Password: {creds["password"]}'
+    return jsonify(success_response(resp, msg)[0]), 200
 
 
 @registration_bp.route('/pending', methods=['GET'])
@@ -210,9 +277,12 @@ def pending_registrations():
     branch_id = claims.get('branch_id')
     page      = request.args.get('page', 1, type=int)
 
+    role  = claims.get('role', '')
     query = Member.query.filter_by(approval_status='Pending')
     if branch_id:
         query = query.filter_by(branch_id=branch_id)
+    elif role == 'branchmanager':
+        return jsonify(error_response('Branch not assigned', 403)[0]), 403
 
     result         = paginate_query(query.order_by(Member.created_at.desc()), page)
     result['items']= [m.to_dict() for m in result['items']]
@@ -291,3 +361,16 @@ def get_investor(investor_id):
     if not member:
         return jsonify(error_response('Investor not found', 404)[0]), 404
     return jsonify(success_response(member.to_dict())[0]), 200
+
+
+@registration_bp.route('/<int:member_id>/blacklist', methods=['POST'])
+@jwt_required()
+def blacklist_investor(member_id):
+    """Admin only — blacklist investor. Blacklisted investors cannot have new plans."""
+    claims = get_jwt()
+    if claims.get('role') != 'superadmin':
+        return jsonify(error_response('Only Admin can blacklist investors', 403)[0]), 403
+    member = Member.query.get_or_404(member_id)
+    member.approval_status = 'Rejected'
+    db.session.commit()
+    return jsonify(success_response(member.to_dict(), f'{member.full_name} blacklisted')[0]), 200

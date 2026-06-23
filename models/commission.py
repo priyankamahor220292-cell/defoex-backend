@@ -55,27 +55,12 @@ class Commission(db.Model):
     investment_id = db.Column(db.Integer, db.ForeignKey('investments.id'), nullable=False)
     adviser_code = db.Column(db.String(30), nullable=False)
     adviser_rank = db.Column(db.String(20))
-    plan_type = db.Column(
-    db.Enum('MIS', 'SIS', name='investment_plan_type_enum'),
-    default='MIS'
-)
-    plan_tenure = db.Column(
-    db.Enum('3Y', '5Y', '7Y', name='investment_plan_tenure_enum'),
-    nullable=False
-)
+    plan_type = db.Column(db.String(10))
+    plan_tenure = db.Column(db.String(10))
     investment_amount = db.Column(db.Numeric(15, 2))
     commission_rate = db.Column(db.Numeric(5, 2))
     commission_amount = db.Column(db.Numeric(15, 2))
-    status = db.Column(
-    db.Enum(
-        'pending',
-        'approved',
-        'rejected',
-        name='commission_status_enum'
-    ),
-    default='pending'
-)
-
+    status = db.Column(db.String(20), default='Pending')
     paid_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 

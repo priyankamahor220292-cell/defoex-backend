@@ -3,15 +3,39 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-# MIS Plan definitions with exact fraction arithmetic
-# 3Y: 4200/3600 = 7/6  → 16.67% ROI
-# 5Y: 8000/6000 = 4/3  → 33.33% ROI
-# 7Y: 11400/8400 = 19/14 → 35.71% ROI
+# MIS Plan Definitions — from official rate chart
+# Formula: maturity = monthly × months × (roi_num / roi_den)
+# 3Y: 1000 × 36 × 7/6  = 42,000   ROI 16.67%
+# 5Y: 1000 × 60 × 4/3  = 80,000   ROI 33.33%
+# 7Y: 1000 × 84 × 19/14 = 114,000  ROI 35.71%
 MIS_PLANS = {
-    '3Y': {'months': 36, 'roi_num': 7,  'roi_den': 6,  'roi_pct': '16.67', 'roi_display': '16.67%'},
-    '5Y': {'months': 60, 'roi_num': 4,  'roi_den': 3,  'roi_pct': '33.33', 'roi_display': '33.33%'},
-    '7Y': {'months': 84, 'roi_num': 19, 'roi_den': 14, 'roi_pct': '35.71', 'roi_display': '35.71%'},
+    '3Y': {'months': 36, 'roi_num': 7,  'roi_den': 6,  'label': 'MIS 3 Year', 'roi_pct': '16.67', 'roi_display': '16.67%'},
+    '5Y': {'months': 60, 'roi_num': 4,  'roi_den': 3,  'label': 'MIS 5 Year', 'roi_pct': '33.33', 'roi_display': '33.33%'},
+    '7Y': {'months': 84, 'roi_num': 19, 'roi_den': 14, 'label': 'MIS 7 Year', 'roi_pct': '35.71', 'roi_display': '35.71%'},
 }
+
+# SIS Plan Definition — from official rate chart
+# Tenure: 7.5 Years (90 months) — Lump Sum Investment
+# Formula: maturity = investment_amount × 2  (100% ROI)
+# Multiples of ₹1,000 — minimum ₹5,000
+# Examples: ₹5,000→₹10,000 | ₹1,00,000→₹2,00,000 | ₹10,00,000→₹20,00,000
+SIS_PLANS = {
+    '7.5Y': {
+        'months': 90, 'roi_num': 2, 'roi_den': 1,
+        'label': 'SIS 7.5 Year', 'roi_pct': '100.00', 'roi_display': '100%',
+        'min_amount': 5000, 'multiple_of': 1000,
+    },
+}
+
+SIS_REF = [
+    (5000,    10000),   (10000,   20000),   (20000,   40000),
+    (30000,   60000),   (40000,   80000),   (50000,   100000),
+    (100000,  200000),  (150000,  300000),  (200000,  400000),
+    (250000,  500000),  (300000,  600000),  (350000,  700000),
+    (400000,  800000),  (450000,  900000),  (500000,  1000000),
+    (600000,  1200000), (700000,  1400000), (800000,  1600000),
+    (900000,  1800000), (1000000, 2000000),
+]
 
 
 class Investment(db.Model):

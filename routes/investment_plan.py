@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
-from models.investment import Investment, Installment, MIS_PLANS
+from models.investment import Investment, Installment, MIS_PLANS, SIS_PLANS
 from models.member import Member
 from models.branch import Branch
 from models.branch_wallet import BranchWallet, WalletTransaction
@@ -94,8 +94,23 @@ def create_plan():
 
     if not investor_id:
         return jsonify(error_response('investor_id is required')[0]), 400
-    if not plan_tenure or plan_tenure not in MIS_PLANS:
-        return jsonify(error_response('plan_tenure must be 3Y, 5Y, or 7Y')[0]), 400
+
+    # Determine plan type (MIS or SIS)
+    plan_type = str(data.get('plan_type', 'MIS')).upper()
+
+    # Validate tenure and get plan definition
+    if plan_type == 'SIS':
+        if not plan_tenure:
+            plan_tenure = '7.5Y'
+        plan = SIS_PLANS.get(plan_tenure) or SIS_PLANS.get('7.5Y')
+        if not plan:
+            return jsonify(error_response('Invalid SIS plan tenure')[0]), 400
+    else:
+        plan_type = 'MIS'
+        if not plan_tenure or plan_tenure not in MIS_PLANS:
+            return jsonify(error_response('plan_tenure must be 3Y, 5Y, or 7Y')[0]), 400
+        plan = MIS_PLANS[plan_tenure]
+
     try:
         monthly_amount = float(monthly_amount)
         if monthly_amount <= 0:
@@ -141,8 +156,11 @@ def create_plan():
     if not wallet:
         return jsonify(error_response('Could not create branch wallet')[0]), 500
 
-    plan = MIS_PLANS[plan_tenure]
-    total_amount = monthly_amount * plan['months']
+    # SIS: monthly_amount IS the lump sum. MIS: monthly × months
+    if plan_type == 'SIS':
+        total_amount = monthly_amount  # lump sum upfront
+    else:
+        total_amount = monthly_amount * plan['months']
 
     if float(wallet.current_balance or 0) < total_amount:
         available = float(wallet.current_balance or 0)
@@ -196,6 +214,15 @@ def create_plan():
 @investment_plan_bp.route('/approve/<int:investment_id>', methods=['POST'])
 @jwt_required()
 def approve_plan(investment_id):
+    # Auto-fix commission_status_enum if it's still a PostgreSQL Enum type
+    try:
+        from sqlalchemy import text as _text
+        with db.engine.connect() as _conn:
+            _conn.execute(_text("ALTER TABLE commissions ALTER COLUMN status TYPE VARCHAR(20)"))
+            _conn.execute(_text("DROP TYPE IF EXISTS commission_status_enum CASCADE"))
+            _conn.commit()
+    except Exception:
+        pass  # Already VARCHAR — ignore
     claims = get_jwt()
     if claims.get('role') not in ['branchmanager', 'superadmin']:
         return jsonify(error_response('Unauthorized', 403)[0]), 403
@@ -289,8 +316,15 @@ def list_plans():
     investor_id = request.args.get('investor_id')
 
     query = Investment.query
-    if branch_id and claims.get('role') == 'branchmanager':
+    if claims.get('role') == 'branchmanager' and branch_id:
+        # BM strictly sees only their branch data
+        # Exclude investments linked to company owner adviser
+        from models.adviser import Adviser as AdvModel
+        owner = AdvModel.query.filter_by(is_company_owner=True).first()
+        owner_code = owner.adviser_code if owner else None
         query = query.filter_by(branch_id=branch_id)
+        if owner_code:
+            query = query.filter(Investment.adviser_code != owner_code)
     if status:
         query = query.filter_by(approval_status=status)
     if investor_id:
@@ -356,4 +390,203 @@ def get_receipt(irn):
         'completion_pct':   round((paid / total * 100), 1) if total else 0,
         'printed_by_role':  role,
         'printed_at':       datetime.utcnow().isoformat(),
+    })[0]), 200
+
+
+@investment_plan_bp.route('/get-investor-details/<investor_id>', methods=['GET'])
+@jwt_required()
+def get_investor_details(investor_id):
+    """
+    Fetch investor details for MIS/SIS plan creation form.
+    Returns: Investor ID, Name, Father Name, Mobile, Adviser ID, Adviser Name, Nominee Details
+    """
+    member = Member.query.filter_by(
+        investor_id=investor_id,
+        approval_status='Approved'
+    ).first()
+    if not member:
+        return jsonify(error_response(
+            f'Investor "{investor_id}" not found or not approved yet'
+        , 404)[0]), 404
+
+    adviser = None
+    if member.adviser_code:
+        from models.adviser import Adviser
+        a = Adviser.query.filter_by(adviser_code=member.adviser_code).first()
+        if a:
+            adviser = {'adviser_code': a.adviser_code, 'full_name': a.full_name, 'rank_name': a.rank_name}
+
+    return jsonify(success_response({
+        'investor_id':    member.investor_id,
+        'investor_name':  member.full_name,
+        'father_name':    member.father_spouse_name,
+        'mobile':         member.mobile,
+        'adviser_id':     member.adviser_code,
+        'adviser_name':   adviser['full_name'] if adviser else None,
+        'adviser_rank':   adviser['rank_name'] if adviser else None,
+        'nominee_name':   member.nominee_name,
+        'nominee_relation': member.nominee_relationship,
+        'nominee_age':    member.nominee_age,
+        'city':           member.corr_city,
+        'branch_id':      member.branch_id,
+    })[0]), 200
+
+
+@investment_plan_bp.route('/mis-contribution', methods=['GET'])
+@jwt_required()
+def mis_contribution_lookup():
+    """
+    MIS Contribution — Enter Investor ID → Get Details → Show investment status.
+    Returns: investor info + all plans with installment status (1 of 36, etc.)
+    """
+    investor_id = request.args.get('investor_id', '').strip()
+    if not investor_id:
+        return jsonify(error_response('investor_id required')[0]), 400
+
+    member = Member.query.filter_by(investor_id=investor_id, approval_status='Approved').first()
+    if not member:
+        return jsonify(error_response(f'Investor "{investor_id}" not found or not approved')[0]), 404
+
+    plans = Investment.query.filter_by(
+        investor_id=investor_id, approval_status='Approved'
+    ).all()
+
+    from models.investment import Installment
+    from datetime import date
+
+    plan_list = []
+    for p in plans:
+        paid    = Installment.query.filter_by(investment_id=p.id, status='Paid').count()
+        pending = Installment.query.filter_by(investment_id=p.id, status='Pending').first()
+        total   = p.total_installments or 0
+
+        # Check if due date exceeded
+        is_overdue  = pending and pending.due_date and pending.due_date < date.today()
+        penalty_amt = 15  # ₹15 penalty if overdue
+        base_amount = float(p.monthly_amount or 0)
+        payable_amt = base_amount + penalty_amt if is_overdue else base_amount
+
+        plan_list.append({
+            **p.to_dict(),
+            'installments_paid':    paid,
+            'total_installments':   total,
+            'status_label':         f'{paid} of {total}',
+            'next_due_date':        pending.due_date.isoformat() if pending and pending.due_date else None,
+            'is_overdue':           is_overdue,
+            'base_amount':          base_amount,
+            'penalty_amount':       penalty_amt if is_overdue else 0,
+            'payable_amount':       payable_amt,
+            'payable_display':      f'\u20b9{payable_amt:,.0f}' + (f' (\u20b9{base_amount:,.0f} + \u20b9{penalty_amt} penalty)' if is_overdue else ''),
+        })
+
+    return jsonify(success_response({
+        'investor': {
+            'investor_id':   member.investor_id,
+            'investor_name': member.full_name,
+            'father_name':   member.father_spouse_name,
+            'mobile':        member.mobile,
+            'adviser_id':    member.adviser_code,
+            'nominee_name':  member.nominee_name,
+            'nominee_relation': member.nominee_relationship,
+        },
+        'plans': plan_list,
+    })[0]), 200
+
+
+@investment_plan_bp.route('/pay-installment/<int:investment_id>', methods=['POST'])
+@jwt_required()
+def pay_installment(investment_id):
+    """
+    Pay next installment for a plan.
+    Checks if overdue → adds ₹15 penalty.
+    After payment → go to Approve Investment Tab.
+    """
+    from models.investment import Installment
+    from datetime import date, datetime
+
+    claims    = get_jwt()
+    identity  = get_jwt_identity()
+    investment = Investment.query.get_or_404(investment_id)
+
+    # Get next pending installment
+    installment = Installment.query.filter_by(
+        investment_id=investment_id, status='Pending'
+    ).order_by(Installment.installment_number).first()
+
+    if not installment:
+        return jsonify(error_response('No pending installments for this plan')[0]), 400
+
+    data        = request.get_json() or {}
+    is_overdue  = installment.due_date and installment.due_date < date.today()
+    penalty     = 15 if is_overdue else 0
+    amount_paid = float(installment.amount or 0) + penalty
+
+    try:
+        installment.status    = 'Paid'
+        installment.paid_date = date.today()
+
+        paid_count = Installment.query.filter_by(
+            investment_id=investment_id, status='Paid').count()
+        investment.installments_paid = paid_count
+
+        db.session.commit()
+
+        return jsonify(success_response({
+            'installment_number': installment.installment_number,
+            'total_installments': investment.total_installments,
+            'amount_paid':        amount_paid,
+            'base_amount':        float(installment.amount or 0),
+            'penalty':            penalty,
+            'is_overdue':         is_overdue,
+            'installments_paid':  paid_count,
+            'status_label':       f'{paid_count} of {investment.total_installments}',
+            'message':            f'Payment successful! Go to Approve Investment Tab.',
+        }, f'Installment {installment.installment_number} paid — ₹{amount_paid:,.0f}')[0]), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print(traceback.format_exc())
+        return jsonify(error_response(str(e))[0]), 500
+
+
+@investment_plan_bp.route('/by-irn/<irn>', methods=['GET'])
+@jwt_required()
+def get_by_irn(irn):
+    """MIS Contribution — Enter Investment ID (IRN) → Fetch full details"""
+    inv = Investment.query.filter_by(irn=irn).first()
+    if not inv:
+        return jsonify(error_response(f'Investment "{irn}" not found', 404)[0]), 404
+
+    member  = Member.query.filter_by(investor_id=inv.investor_id).first()
+    from models.investment import Installment
+    from datetime import date
+
+    paid    = Installment.query.filter_by(investment_id=inv.id, status='Paid').count()
+    pending = Installment.query.filter_by(investment_id=inv.id, status='Pending')                .order_by(Installment.installment_number).first()
+
+    is_overdue  = pending and pending.due_date and pending.due_date < date.today()
+    base        = float(inv.monthly_amount or 0)
+    penalty     = 15 if is_overdue else 0
+    payable     = base + penalty
+
+    return jsonify(success_response({
+        'investment': {
+            **inv.to_dict(),
+            'installments_paid':  paid,
+            'status_label':       f'{paid} of {inv.total_installments}',
+            'next_due_date':      pending.due_date.isoformat() if pending and pending.due_date else None,
+            'is_overdue':         bool(is_overdue),
+            'base_amount':        base,
+            'penalty_amount':     penalty,
+            'payable_amount':     payable,
+        },
+        'investor': {
+            'investor_id':       member.investor_id if member else inv.investor_id,
+            'investor_name':     member.full_name if member else None,
+            'father_name':       member.father_spouse_name if member else None,
+            'mobile':            member.mobile if member else None,
+            'adviser_id':        member.adviser_code if member else inv.adviser_code,
+            'nominee_name':      member.nominee_name if member else None,
+            'nominee_relation':  member.nominee_relationship if member else None,
+        }
     })[0]), 200

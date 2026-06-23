@@ -61,6 +61,11 @@ def dashboard_stats():
         if role == 'branchmanager' and branch_id:
             q_members     = q_members.filter_by(branch_id=branch_id)
             q_investments = q_investments.filter_by(branch_id=branch_id)
+            # Exclude company owner adviser from BM view
+            from models.adviser import Adviser as AdvModel
+            q_advisers_bm = AdvModel.query.filter_by(
+                branch_id=branch_id, is_active=True, is_company_owner=False
+            )
 
         total_members     = q_members.count()
         total_investments = q_investments.count()
@@ -80,6 +85,7 @@ def dashboard_stats():
         if role == 'branchmanager' and branch_id:
             pending_q_members = pending_q_members.filter_by(branch_id=branch_id)
             pending_q_inv     = pending_q_inv.filter_by(branch_id=branch_id)
+            # BM never sees company owner related data
 
         pending_members     = pending_q_members.count()
         pending_investments = pending_q_inv.count()
@@ -255,7 +261,8 @@ def global_search():
                     Adviser.adviser_code.ilike(q_like),
                     Adviser.full_name.ilike(q_like),
                     Adviser.mobile.ilike(q_like),
-                )
+                ),
+                Adviser.is_company_owner == False  # Never show company owner
             )
             if branch_id:
                 adv_q = adv_q.filter_by(branch_id=branch_id)

@@ -36,6 +36,7 @@ class Adviser(db.Model):
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     parent_adviser_code = db.Column(db.String(30), nullable=True)  # upline adviser
     is_company_owner = db.Column(db.Boolean, default=False)
+    is_blacklisted   = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -46,6 +47,18 @@ class Adviser(db.Model):
         return RANKS.get(self.rank_id, 'SR')
 
     def to_dict(self):
+        rank_name = RANKS.get(self.rank_id, 'SR')
+        # Get parent adviser name
+        parent_name = None
+        if self.parent_adviser_code:
+            try:
+                from extensions import db
+                p = db.session.query(Adviser).filter_by(
+                    adviser_code=self.parent_adviser_code).first()
+                if p:
+                    parent_name = p.full_name
+            except Exception:
+                pass
         return {
             'id': self.id,
             'adviser_code': self.adviser_code,
@@ -56,7 +69,10 @@ class Adviser(db.Model):
             'rank_name': self.rank_name,
             'branch_id': self.branch_id,
             'parent_adviser_code': self.parent_adviser_code,
-            'is_company_owner': self.is_company_owner,
+            'is_company_owner':   self.is_company_owner,
+            'is_blacklisted':     getattr(self, 'is_blacklisted', False),
+            'father_name':        getattr(self, 'father_name', None),
+            'parent_adviser_name': parent_name,
             'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }

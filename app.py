@@ -26,6 +26,7 @@ def create_app():
     from routes.reports_v4     import reports_v4_bp
     from routes.branches        import branches_bp
     from routes.advisers        import advisers_bp
+    from routes.adviser_portal  import adviser_portal_bp
     from routes.commissions     import commissions_bp
     from routes.notifications   import notifications_bp
     from routes.users           import users_bp
@@ -36,6 +37,7 @@ def create_app():
     app.register_blueprint(reports_v4_bp)
     app.register_blueprint(branches_bp)
     app.register_blueprint(advisers_bp)
+    app.register_blueprint(adviser_portal_bp)
     app.register_blueprint(commissions_bp)
     app.register_blueprint(notifications_bp)
     app.register_blueprint(users_bp)
