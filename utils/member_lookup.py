@@ -9,6 +9,7 @@ from extensions import db
 from models.member import Member
 from models.adviser import Adviser
 from models.user import User
+from utils.helpers import normalize_mobile, find_member_by_mobile
 
 
 def _approved_members():
@@ -42,9 +43,10 @@ def find_member_for_adviser(adviser):
             return member
 
     if adviser.mobile:
-        member = _approved_members().filter_by(mobile=adviser.mobile).first()
-        if member:
-            return member
+        norm = normalize_mobile(adviser.mobile)
+        for member in _approved_members().filter(Member.mobile.isnot(None)).all():
+            if normalize_mobile(member.mobile) == norm:
+                return member
 
     if adviser.email:
         email = adviser.email.strip().lower()
@@ -137,6 +139,8 @@ def resolve_member_from_code(raw_code):
     member = Member.query.filter(
         db.func.upper(Member.investor_id) == code
     ).first()
+    if not member:
+        member = find_member_by_mobile(code)
     if member:
         return _ensure_approved(member, code)
 

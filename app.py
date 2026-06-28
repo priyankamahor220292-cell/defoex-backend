@@ -73,6 +73,13 @@ def create_app():
             from models.commission    import Commission
             from models.notification  import Notification
 
+            from utils.db_migrations import (
+                ensure_adviser_investor_id_column,
+                backfill_adviser_investor_links,
+            )
+            ensure_adviser_investor_id_column(db)
+            backfill_adviser_investor_links(db)
+
             try:
                 if not User.query.first():
                     from utils.seed import seed_database
