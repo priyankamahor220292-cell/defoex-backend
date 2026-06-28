@@ -10,18 +10,31 @@ from utils.helpers import success_response, error_response
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
+
+def _find_user_by_login(login):
+    """Find user by username or email (case-insensitive)."""
+    login = (login or '').strip()
+    if not login:
+        return None
+    key = login.lower()
+    return User.query.filter(
+        db.or_(
+            db.func.lower(User.username) == key,
+            db.func.lower(User.email) == key,
+        )
+    ).first()
+
+
 @auth_bp.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    username = data.get('username', '').strip()
-    password = data.get('password', '')
+    data = request.get_json(silent=True) or {}
+    username = (data.get('username') or '').strip()
+    password = (data.get('password') or '')
 
     if not username or not password:
         return jsonify(error_response('Username and password required')[0]), 400
 
-    user = User.query.filter(
-        (User.username == username) | (User.email == username)
-    ).first()
+    user = _find_user_by_login(username)
 
     if not user or not user.check_password(password):
         return jsonify(error_response('Invalid credentials', 401)[0]), 401

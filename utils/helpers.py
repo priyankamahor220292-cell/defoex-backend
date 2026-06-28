@@ -8,6 +8,7 @@ ID Formats:
 """
 
 from datetime import date, datetime
+import re
 from extensions import db
 
 
@@ -54,6 +55,34 @@ def generate_irn():
 
 
 # ── Age from DOB ──────────────────────────────────────────────────────────────
+def normalize_mobile(mobile):
+    """Return last 10 digits for consistent mobile comparison."""
+    if not mobile:
+        return ''
+    digits = re.sub(r'\D', '', str(mobile))
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def find_member_by_mobile(mobile):
+    from models.member import Member
+    norm = normalize_mobile(mobile)
+    if not norm:
+        return None
+    for member in Member.query.filter(Member.mobile.isnot(None)).all():
+        if normalize_mobile(member.mobile) == norm:
+            return member
+    return None
+
+
+def find_adviser_by_mobile(mobile):
+    from models.adviser import Adviser
+    norm = normalize_mobile(mobile)
+    if not norm:
+        return None
+    for adviser in Adviser.query.filter(Adviser.mobile.isnot(None)).all():
+        if normalize_mobile(adviser.mobile) == norm:
+            return adviser
+    return None
 def calculate_age(dob):
     if not dob:
         return None

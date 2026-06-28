@@ -6,7 +6,8 @@ from models.investment import Investment
 from extensions import db
 from utils.helpers import (
     generate_investor_id, calculate_age,
-    success_response, error_response, paginate_query
+    success_response, error_response, paginate_query,
+    normalize_mobile, find_member_by_mobile,
 )
 from datetime import datetime, date
 import traceback
@@ -89,8 +90,15 @@ def new_registration():
     if missing:
         return jsonify(error_response(f"Missing required fields: {', '.join(missing)}")[0]), 400
 
-    if Member.query.filter_by(mobile=str(data['mobile'])).first():
-        return jsonify(error_response('Mobile number already registered')[0]), 409
+    mobile = normalize_mobile(data.get('mobile'))
+    if not mobile or len(mobile) != 10:
+        return jsonify(error_response('Valid 10-digit mobile number is required')[0]), 400
+
+    existing_member = find_member_by_mobile(mobile)
+    if existing_member:
+        return jsonify(error_response(
+            f'Mobile number already registered as investor {existing_member.investor_id}'
+        )[0]), 409
     if data.get('aadhar_number') and Member.query.filter_by(aadhar_number=str(data['aadhar_number'])).first():
         return jsonify(error_response('Aadhar number already registered')[0]), 409
 
@@ -115,7 +123,7 @@ def new_registration():
             gender           = safe_enum(data.get('gender'), ['Male','Female','Other']),
             marital_status   = safe_enum(data.get('marital_status'), ['Single','Married','Divorced','Widowed']),
             nationality      = data.get('nationality') or 'Indian',
-            mobile           = str(data['mobile']).strip(),
+            mobile           = mobile,
             phone_office     = data.get('phone_office') or None,
             phone_residence  = data.get('phone_residence') or None,
             email            = data.get('email') or None,
@@ -256,6 +264,16 @@ def approve_registration(member_id):
 
         msg = f'Registration approved for {member.full_name} — ₹{fees:.0f} deducted from branch wallet'
         creds = {'username': username, 'password': password}
+
+        # Link adviser profile when same person has different codes (DFX vs DEFAD)
+        from models.adviser import Adviser
+        adviser = Adviser.query.filter_by(mobile=member.mobile).first()
+        if not adviser and member.email:
+            adviser = Adviser.query.filter(
+                db.func.lower(Adviser.email) == member.email.strip().lower()
+            ).first()
+        if adviser and not getattr(adviser, 'investor_id', None):
+            adviser.investor_id = member.investor_id
     elif action == 'reject':
         member.approval_status = 'Rejected'
         msg = f'Registration rejected for {member.full_name}'

@@ -35,6 +35,7 @@ class Adviser(db.Model):
     rank_id = db.Column(db.Integer, default=1)  # 1=SR ... 20=House8
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     parent_adviser_code = db.Column(db.String(30), nullable=True)  # upline adviser
+    investor_id = db.Column(db.String(30), nullable=True)  # linked investor when codes differ
     is_company_owner = db.Column(db.Boolean, default=False)
     is_blacklisted   = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
@@ -69,6 +70,7 @@ class Adviser(db.Model):
             'rank_name': self.rank_name,
             'branch_id': self.branch_id,
             'parent_adviser_code': self.parent_adviser_code,
+            'investor_id': getattr(self, 'investor_id', None),
             'is_company_owner':   self.is_company_owner,
             'is_blacklisted':     getattr(self, 'is_blacklisted', False),
             'father_name':        getattr(self, 'father_name', None),

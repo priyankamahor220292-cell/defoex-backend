@@ -23,11 +23,13 @@ import re
 from extensions import db
 from models.investment import Investment, Installment, MIS_PLANS, SIS_PLANS
 from models.member import Member
+from models.adviser import Adviser
 from models.branch import Branch
 from models.user import User
 from utils.helpers import success_response, error_response
+from utils.member_lookup import resolve_member_from_code, link_adviser_investor
 
-investment_plan_bp = Blueprint('investment_plan', __name__)
+investment_plan_bp = Blueprint('investment_plan', __name__, url_prefix='/api/investment-plans')
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 VALID_UPI_APPS = {'phonepe', 'paytm', 'gpay', 'googlepay', 'bhim', 'other'}
@@ -87,40 +89,8 @@ def _validate_upi_fields(data: dict):
 
 
 def _get_member_by_any_id(member_id: str):
-    """
-    Look up a Member by investor_id OR adviser_id.
-    Accepts status: 'approved' or 'active'.
-    Returns (member, None) or (None, error_string).
-    """
-    if not member_id:
-        return None, 'Investor ID / Adviser ID is required'
-
-    member_id = member_id.strip().upper()
-
-    # Try investor_id first
-    member = Member.query.filter(
-        db.func.upper(Member.investor_id) == member_id
-    ).first()
-
-    # Try adviser_id if not found as investor
-    if not member:
-        member = Member.query.filter(
-            db.func.upper(Member.adviser_id) == member_id
-        ).first()
-
-    if not member:
-        return None, f'Member "{member_id}" not found'
-
-    allowed_statuses = {'approved', 'active'}
-    member_status = (member.status or '').lower().strip()
-    if member_status not in allowed_statuses:
-        return None, (
-            f'Member "{member_id}" is not approved yet '
-            f'(current status: {member.status or "unknown"}). '
-            f'Please approve the member first before creating a plan.'
-        )
-
-    return member, None
+    """Look up approved Member by investor ID, adviser code (DFX-*), or login ID (DEFAD*)."""
+    return resolve_member_from_code(member_id)
 
 
 def _get_current_branch():
@@ -158,23 +128,23 @@ def get_investor_details(member_id):
 
     # Try to get adviser name
     adviser_name = None
-    if member.adviser_id:
-        adviser = Member.query.filter(
-            db.func.upper(Member.investor_id) == member.adviser_id.strip().upper()
+    if member.adviser_code:
+        adviser = Adviser.query.filter(
+            db.func.upper(Adviser.adviser_code) == member.adviser_code.strip().upper()
         ).first()
         if adviser:
             adviser_name = adviser.full_name
 
     data = {
         'investor_id':      member.investor_id,
-        'adviser_id':       member.adviser_id,
+        'adviser_id':       member.adviser_code,
         'full_name':        member.full_name,
-        'father_name':      getattr(member, 'father_name', None),
+        'father_name':      member.father_spouse_name,
         'mobile':           member.mobile,
         'adviser_name':     adviser_name,
-        'nominee_name':     getattr(member, 'nominee_name', None),
-        'nominee_relation': getattr(member, 'nominee_relation', None),
-        'status':           member.status,
+        'nominee_name':     member.nominee_name,
+        'nominee_relation': member.nominee_relationship,
+        'status':           (member.approval_status or '').lower(),
     }
 
     return jsonify({'success': True, 'data': data, 'message': 'Member details fetched'}), 200
@@ -249,7 +219,7 @@ def create_mis_plan():
         investment = Investment(
             member_id       = member.id,
             investor_id     = member.investor_id,
-            adviser_id      = member.adviser_id,
+            adviser_code    = member.adviser_code,
             branch_id       = branch.id,
             plan_type       = 'MIS',
             plan_tenure     = plan_tenure,
@@ -358,7 +328,7 @@ def create_sis_plan():
         investment = Investment(
             member_id       = member.id,
             investor_id     = member.investor_id,
-            adviser_id      = member.adviser_id,
+            adviser_code    = member.adviser_code,
             branch_id       = branch.id,
             plan_type       = 'SIS',
             plan_tenure     = '7.5Y',

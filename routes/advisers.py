@@ -4,7 +4,7 @@ from models.adviser import Adviser
 from models.member import Member
 from extensions import db
 from sqlalchemy import text
-from utils.helpers import generate_adviser_code, success_response, error_response
+from utils.helpers import generate_adviser_code, success_response, error_response, normalize_mobile, find_adviser_by_mobile, find_member_by_mobile
 import traceback
 
 advisers_bp = Blueprint('advisers', __name__, url_prefix='/api/advisers')
@@ -56,22 +56,24 @@ def create_adviser():
         return jsonify(error_response('Unauthorized', 403)[0]), 403
 
     data      = request.get_json() or {}
-    mobile    = str(data.get('mobile', '')).strip()
+    mobile    = normalize_mobile(data.get('mobile', ''))
     full_name = str(data.get('full_name', '')).strip()
     branch_id = data.get('branch_id') or claims.get('branch_id')
 
     if not full_name or not mobile:
         return jsonify(error_response('full_name and mobile are required')[0]), 400
+    if len(mobile) != 10:
+        return jsonify(error_response('Valid 10-digit mobile number is required')[0]), 400
 
-    existing = Adviser.query.filter_by(mobile=mobile).first()
+    existing = find_adviser_by_mobile(mobile)
     if existing:
         return jsonify(error_response(
             f'This person is already an adviser. Code: {existing.adviser_code}'
         )[0]), 409
 
     # Reuse investor code if same person
-    investor = Member.query.filter_by(mobile=mobile, approval_status='Approved').first()
-    if investor:
+    investor = find_member_by_mobile(mobile)
+    if investor and investor.approval_status == 'Approved':
         code = investor.investor_id
         note = f'Investor {code} promoted to adviser — same code used for both roles.'
     else:
@@ -88,6 +90,7 @@ def create_adviser():
             rank_id             = int(data.get('rank_id', 1)),
             branch_id           = int(branch_id) if branch_id else None,
             parent_adviser_code = data.get('parent_adviser_code') or None,
+            investor_id         = investor.investor_id if (investor and investor.approval_status == 'Approved') else None,
             is_active           = False,  # Pending until approved in Approved Adviser tab
         )
         # Set father_name safely — column may not exist in older model versions
@@ -251,6 +254,8 @@ def approve_adviser(adviser_id):
     # Always approve the adviser
     adviser.is_active = True
     try:
+        from utils.member_lookup import link_adviser_investor
+        link_adviser_investor(adviser)
         db.session.commit()
     except Exception as ex:
         db.session.rollback()
