@@ -27,7 +27,12 @@ from models.adviser import Adviser
 from models.branch import Branch
 from models.user import User
 from utils.helpers import success_response, error_response, generate_irn
-from utils.member_lookup import resolve_member_from_code, link_adviser_investor
+from utils.member_lookup import (
+    resolve_member_from_code,
+    link_adviser_investor,
+    find_adviser_identity,
+    find_member_for_adviser,
+)
 
 investment_plan_bp = Blueprint('investment_plan', __name__, url_prefix='/api/investment-plans')
 
@@ -140,35 +145,76 @@ def _get_current_branch(member=None):
 def get_investor_details(member_id):
     """
     Fetch member info for the MIS / SIS plan creation form.
-    Accepts investor_id OR adviser_id.
-    Member must be approved or active.
+    Accepts investor_id, adviser_code, or DEFAD login ID.
+    Returns adviser-only profile when investor registration is still pending.
     """
-    member, err = _get_member_by_any_id(member_id)
-    if err:
-        return jsonify({'success': False, 'message': err}), 400
+    code = (member_id or '').strip().upper()
+    member, err = _get_member_by_any_id(code)
 
-    # Try to get adviser name
-    adviser_name = None
-    if member.adviser_code:
-        adviser = Adviser.query.filter(
-            db.func.upper(Adviser.adviser_code) == member.adviser_code.strip().upper()
-        ).first()
-        if adviser:
-            adviser_name = adviser.full_name
+    if member:
+        adviser_name = None
+        if member.adviser_code:
+            adviser = Adviser.query.filter(
+                db.func.upper(Adviser.adviser_code) == member.adviser_code.strip().upper()
+            ).first()
+            if adviser:
+                adviser_name = adviser.full_name
 
-    data = {
-        'investor_id':      member.investor_id,
-        'adviser_id':       member.adviser_code,
-        'full_name':        member.full_name,
-        'father_name':      member.father_spouse_name,
-        'mobile':           member.mobile,
-        'adviser_name':     adviser_name,
-        'nominee_name':     member.nominee_name,
-        'nominee_relation': member.nominee_relationship,
-        'status':           (member.approval_status or '').lower(),
-    }
+        data = {
+            'investor_id':      member.investor_id,
+            'adviser_id':       member.adviser_code,
+            'full_name':        member.full_name,
+            'father_name':      member.father_spouse_name,
+            'mobile':           member.mobile,
+            'adviser_name':     adviser_name,
+            'nominee_name':     member.nominee_name,
+            'nominee_relation': member.nominee_relationship,
+            'status':           (member.approval_status or '').lower(),
+            'can_create_plan':  True,
+        }
+        return jsonify({'success': True, 'data': data, 'message': 'Member details fetched'}), 200
 
-    return jsonify({'success': True, 'data': data, 'message': 'Member details fetched'}), 200
+    adviser, _user = find_adviser_identity(code)
+    if adviser:
+        pending = None
+        if adviser.mobile:
+            pending = Member.query.filter_by(
+                mobile=adviser.mobile,
+                approval_status='Pending',
+            ).first()
+
+        linked_member = find_member_for_adviser(adviser)
+
+        if linked_member and (linked_member.approval_status or '').lower() != 'approved':
+            pending = linked_member
+
+        if pending:
+            msg = (
+                f'Investor registration for {adviser.full_name} ({pending.investor_id}) '
+                f'is pending approval. Approve the member before creating a plan.'
+            )
+        else:
+            msg = (
+                f'{adviser.full_name} is registered as an adviser ({adviser.adviser_code}) '
+                f'but has no approved investor profile. Register them as an investor first.'
+            )
+
+        data = {
+            'investor_id':      getattr(adviser, 'investor_id', None) or '',
+            'adviser_id':       adviser.adviser_code,
+            'full_name':        adviser.full_name,
+            'father_name':      getattr(adviser, 'father_name', None),
+            'mobile':           adviser.mobile,
+            'adviser_name':     adviser.full_name,
+            'nominee_name':     None,
+            'nominee_relation': None,
+            'status':           'pending' if pending else 'adviser_only',
+            'can_create_plan':  False,
+            'pending_investor_id': pending.investor_id if pending else None,
+        }
+        return jsonify({'success': True, 'data': data, 'message': msg, 'can_create_plan': False}), 200
+
+    return jsonify({'success': False, 'message': err or f'No record found for "{code}"'}), 400
 
 
 # ─── CREATE MIS PLAN ─────────────────────────────────────────────────────────

@@ -56,8 +56,17 @@ def check_adviser():
             'Adviser codes look like DFX-2026-000001.'
         )[0]), 400
 
-    # Find adviser — try exact match first
-    adviser = Adviser.query.filter_by(adviser_code=code, is_active=True).first()
+    # Find adviser — try code, login username, or DEFAD user
+    from utils.member_lookup import find_adviser_by_code_or_login, find_adviser_for_user
+    from models.user import User
+
+    adviser = find_adviser_by_code_or_login(code)
+    if not adviser:
+        user = User.query.filter(db.func.upper(User.username) == code.upper()).first()
+        if user:
+            adviser = find_adviser_for_user(user)
+    if not adviser:
+        adviser = Adviser.query.filter_by(adviser_code=code, is_active=True).first()
 
     # Try old ADV format if not found  (DFX-ADV-2026-000001)
     if not adviser and not code.startswith('DFX-ADV-'):

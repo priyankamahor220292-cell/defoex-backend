@@ -252,7 +252,7 @@ def resolve_member_from_code(raw_code):
             f'Register them as an investor first or use their Investor ID.'
         )
 
-    return None, f'No investor or adviser found for "{code}"'
+    return None, not_found_message(code)
 
 
 def _ensure_approved(member, code):
@@ -264,3 +264,53 @@ def _ensure_approved(member, code):
             f'Please approve the member first before creating a plan.'
         )
     return member, None
+
+
+def find_adviser_identity(raw_code):
+    """
+    Find an Adviser (and optional login User) from any ID format.
+    Does not require an approved Member.
+    """
+    if not raw_code or not str(raw_code).strip():
+        return None, None
+
+    code = str(raw_code).strip().upper()
+    adviser = find_adviser_by_code_or_login(code)
+    user = None
+
+    if not adviser:
+        user = User.query.filter(db.func.upper(User.username) == code).first()
+        if user:
+            adviser = find_adviser_for_user(user)
+
+    return adviser, user
+
+
+def defad_id_suggestions(limit=5):
+    """Recent DEFAD login / adviser IDs in this database (for error hints)."""
+    codes = set()
+    for row in User.query.filter(User.username.ilike('DEFAD%')).order_by(User.id.desc()).limit(20):
+        codes.add(row.username.upper())
+    for row in Adviser.query.filter(Adviser.login_username.isnot(None)).order_by(Adviser.id.desc()).limit(20):
+        if row.login_username:
+            codes.add(row.login_username.upper())
+    for row in Adviser.query.filter(Adviser.adviser_code.ilike('DEFAD%')).order_by(Adviser.id.desc()).limit(20):
+        codes.add(row.adviser_code.upper())
+    return sorted(codes, reverse=True)[:limit]
+
+
+def not_found_message(code):
+    """Helpful message when an ID is missing from the current database."""
+    hints = defad_id_suggestions()
+    msg = (
+        f'No investor or adviser found for "{code}" in this database. '
+        f'If this ID was created on the live server, it is not in your local DB — '
+        f'create/register the person here first, or use their Investor ID.'
+    )
+    if hints:
+        msg += f' Available DEFAD IDs here: {", ".join(hints)}.'
+    approved = _approved_members().order_by(Member.id.desc()).limit(5).all()
+    if approved:
+        inv_ids = ', '.join(m.investor_id for m in approved)
+        msg += f' Approved investors: {inv_ids}.'
+    return msg
