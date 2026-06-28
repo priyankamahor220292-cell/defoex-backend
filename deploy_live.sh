@@ -1,65 +1,102 @@
 #!/bin/bash
-# Deploy backend + verify API on live server (3.110.209.154)
-# Run ON THE SERVER from defoex-backend after git pull:
-#   bash deploy_live.sh
+# Deploy backend + nginx on live server (3.110.209.154)
+# Run ON THE SERVER:
+#   cd ~/defoex-backend && bash deploy_live.sh
+#
+# Fixes: POST /api/auth/login returning 404 (stale gunicorn or nginx not proxying /api)
 
 set -e
 cd "$(dirname "$0")"
 
-echo "=== 1. Schema + link adviser ↔ investor records ==="
-python3 utils/fix_adviser_investor_link.py
+echo "=== 0. Sync code (keep server .env) ==="
+if [ -f .env ]; then
+  cp .env /tmp/defoex.env.bak
+fi
+git fetch origin main
+git reset --hard origin/main
+if [ -f /tmp/defoex.env.bak ]; then
+  cp /tmp/defoex.env.bak .env
+  echo "Restored .env"
+fi
 
 echo ""
-echo "=== 2. Restart API (gunicorn on port 8000) ==="
+echo "=== 1. Python deps + gunicorn ==="
+if [ -d venv ]; then
+  # shellcheck disable=SC1091
+  source venv/bin/activate
+elif [ -d .venv ]; then
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+fi
+pip install -q -r requirements.txt
+pip install -q gunicorn
 
-# Stop anything bound to port 8000 or old gunicorn on :80
+echo ""
+echo "=== 2. Schema + adviser ↔ investor links ==="
+python3 utils/fix_adviser_investor_link.py || true
+
+echo ""
+echo "=== 3. Restart API (gunicorn on 127.0.0.1:8000) ==="
 pkill -f 'gunicorn.*wsgi:app' 2>/dev/null || true
 pkill -f 'gunicorn.*app:app' 2>/dev/null || true
 sleep 1
 
-if systemctl is-active --quiet defoex 2>/dev/null; then
-  sudo systemctl restart defoex
-  echo "Restarted: defoex systemd service"
-elif [ -f /etc/systemd/system/defoex.service ]; then
+if [ -f deploy/defoex.service ] && command -v systemctl >/dev/null 2>&1; then
+  sudo cp deploy/defoex.service /etc/systemd/system/defoex.service
   sudo systemctl daemon-reload
   sudo systemctl enable defoex
   sudo systemctl restart defoex
-  echo "Started: defoex systemd service"
-elif command -v gunicorn >/dev/null 2>&1; then
+  echo "Restarted systemd service: defoex"
+else
   nohup gunicorn -w 4 -b 127.0.0.1:8000 wsgi:app >/tmp/defoex-gunicorn.log 2>&1 &
   echo "Started gunicorn wsgi:app on 127.0.0.1:8000 (log: /tmp/defoex-gunicorn.log)"
-else
-  echo "ERROR: gunicorn not found. Install: pip install gunicorn"
+fi
+
+sleep 3
+
+echo ""
+echo "=== 4. Smoke tests (direct gunicorn — must NOT be 404) ==="
+HC=$(curl -s -o /tmp/defoex-health.json -w "%{http_code}" http://127.0.0.1:8000/health || echo "000")
+echo "GET  /health → HTTP $HC"
+head -c 120 /tmp/defoex-health.json 2>/dev/null; echo
+
+LC=$(curl -s -o /dev/null -w "%{http_code}" \
+  -X POST http://127.0.0.1:8000/api/auth/login \
+  -H "Content-Type: application/json" -d '{}' || echo "000")
+echo "POST /api/auth/login → HTTP $LC (expect 400, NOT 404)"
+
+if [ "$HC" != "200" ] || [ "$LC" = "404" ]; then
+  echo "ERROR: gunicorn is not serving routes. Check: tail -50 /tmp/defoex-gunicorn.log"
+  journalctl -u defoex -n 30 --no-pager 2>/dev/null || true
   exit 1
 fi
 
-sleep 2
-
 echo ""
-echo "=== 3. Smoke tests (API must NOT be 404) ==="
-curl -s -o /dev/null -w "GET  /health → HTTP %{http_code}\n" http://127.0.0.1:8000/health || true
-curl -s -o /dev/null -w "POST /api/auth/login → HTTP %{http_code}\n" \
-  -X POST http://127.0.0.1:8000/api/auth/login \
-  -H "Content-Type: application/json" -d '{}' || true
-curl -s -o /dev/null -w "GET  /api/investment-plans/list → HTTP %{http_code}\n" \
-  http://127.0.0.1:8000/api/investment-plans/list || true
-
-echo ""
-echo "=== 4. Nginx — proxy /api and /health to gunicorn :8000 ==="
+echo "=== 5. Nginx — proxy /api and /health to gunicorn :8000 ==="
 if command -v nginx >/dev/null 2>&1 && [ -f deploy/nginx-defoex.conf ]; then
   sudo cp deploy/nginx-defoex.conf /etc/nginx/sites-available/defoex
   sudo ln -sf /etc/nginx/sites-available/defoex /etc/nginx/sites-enabled/defoex
-  # Disable default site if it steals port 80 without /api proxy
   sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
   sudo nginx -t
   sudo systemctl reload nginx
-  echo "Nginx reloaded with /api → 127.0.0.1:8000"
-  curl -s -o /dev/null -w "PUBLIC POST /api/auth/login → HTTP %{http_code}\n" \
+  echo "Nginx reloaded"
+
+  PHC=$(curl -s -o /tmp/defoex-pub-health.json -w "%{http_code}" http://127.0.0.1/health || echo "000")
+  PLC=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST http://127.0.0.1/api/auth/login \
-    -H "Content-Type: application/json" -d '{}' || true
+    -H "Content-Type: application/json" -d '{}' || echo "000")
+  echo "PUBLIC GET  /health → HTTP $PHC (expect 200 JSON)"
+  echo "PUBLIC POST /api/auth/login → HTTP $PLC (expect 400, NOT 404)"
+  head -c 120 /tmp/defoex-pub-health.json 2>/dev/null; echo
+
+  if [ "$PLC" = "404" ]; then
+    echo "ERROR: nginx still returns 404 for /api. Check: sudo nginx -T | grep -A5 location"
+    exit 1
+  fi
 else
-  echo "nginx not installed — API only on 127.0.0.1:8000"
+  echo "WARN: nginx not installed — API only on 127.0.0.1:8000"
 fi
 
 echo ""
-echo "✅ Deploy done. POST /api/auth/login should return 400 or 401 (NOT 404)."
+echo "✅ Deploy done. Login at http://3.110.209.154/login should work."
+echo "   Test: curl -s http://127.0.0.1/health  (must show JSON, not HTML)"
