@@ -40,3 +40,49 @@ def backfill_adviser_investor_links(db):
     except Exception as e:
         db.session.rollback()
         print(f"  NOTE adviser link backfill: {e}")
+
+
+def ensure_adviser_login_username_column(db):
+    """Add advisers.login_username if missing (links DEFAD login to adviser row)."""
+    try:
+        insp = inspect(db.engine)
+        cols = [c['name'] for c in insp.get_columns('advisers')]
+        if 'login_username' in cols:
+            return
+        with db.engine.connect() as conn:
+            conn.execute(text(
+                "ALTER TABLE advisers ADD COLUMN login_username VARCHAR(50)"
+            ))
+            conn.commit()
+        print("  OK   Added advisers.login_username column")
+    except Exception as e:
+        print(f"  NOTE adviser.login_username migration: {e}")
+
+
+def backfill_adviser_login_usernames(db):
+    """Set login_username on advisers from matching advisor User accounts."""
+    try:
+        from models.adviser import Adviser
+        from models.user import User
+        from utils.member_lookup import find_adviser_for_user
+
+        updated = 0
+        for user in User.query.filter(User.role.in_(('advisor', 'adviser'))).all():
+            if not user.username:
+                continue
+            adviser = Adviser.query.filter(
+                db.func.upper(Adviser.login_username) == user.username.strip().upper()
+            ).first()
+            if adviser:
+                continue
+            adviser = find_adviser_for_user(user)
+            if adviser and not getattr(adviser, 'login_username', None):
+                adviser.login_username = user.username.strip().upper()
+                updated += 1
+
+        if updated:
+            db.session.commit()
+            print(f"  OK   Backfilled login_username on {updated} adviser(s)")
+    except Exception as e:
+        db.session.rollback()
+        print(f"  NOTE adviser login_username backfill: {e}")

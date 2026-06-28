@@ -251,8 +251,9 @@ def approve_adviser(adviser_id):
         print(f"User insert skipped: {ex}")
         db.session.rollback()
 
-    # Always approve the adviser
+    # Always approve the adviser and store login username for ID lookup
     adviser.is_active = True
+    adviser.login_username = username.strip().upper()
     try:
         from utils.member_lookup import link_adviser_investor
         link_adviser_investor(adviser)

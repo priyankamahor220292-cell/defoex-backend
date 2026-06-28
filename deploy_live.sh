@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")"
 
-echo "=== 1. Add adviser.investor_id column + link records ==="
+echo "=== 1. Schema + link adviser ↔ investor records ==="
 python3 utils/fix_adviser_investor_link.py
 
 echo ""

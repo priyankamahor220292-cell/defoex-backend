@@ -33,11 +33,21 @@ with app.app_context():
         else:
             print("  SKIP investor_id column already exists")
 
+        if 'login_username' not in cols:
+            conn.execute(text(
+                "ALTER TABLE advisers ADD COLUMN login_username VARCHAR(50)"
+            ))
+            conn.commit()
+            print("  OK   Added advisers.login_username column")
+        else:
+            print("  SKIP login_username column already exists")
+
     from app import create_app
     app2 = create_app()
     with app2.app_context():
         from models.adviser import Adviser
-        from utils.member_lookup import find_member_for_adviser
+        from utils.member_lookup import find_member_for_adviser, find_adviser_for_user
+        from models.user import User
 
         linked = 0
         for adviser in Adviser.query.all():
@@ -49,5 +59,20 @@ with app.app_context():
                 linked += 1
                 print(f"  OK   {adviser.adviser_code} → {member.investor_id} ({adviser.full_name})")
 
+        login_linked = 0
+        for user in User.query.filter(User.role.in_(('advisor', 'adviser'))).all():
+            if not user.username:
+                continue
+            adviser = Adviser.query.filter(
+                db.func.upper(Adviser.login_username) == user.username.strip().upper()
+            ).first()
+            if adviser:
+                continue
+            adviser = find_adviser_for_user(user)
+            if adviser and not adviser.login_username:
+                adviser.login_username = user.username.strip().upper()
+                login_linked += 1
+                print(f"  OK   login {user.username} → {adviser.adviser_code}")
+
         db.session.commit()
-        print(f"\n✅ Linked {linked} adviser(s). Restart Flask: python app.py")
+        print(f"\n✅ Linked {linked} adviser(s), {login_linked} login username(s). Restart Flask: python app.py")

@@ -75,10 +75,14 @@ def create_app():
 
             from utils.db_migrations import (
                 ensure_adviser_investor_id_column,
+                ensure_adviser_login_username_column,
                 backfill_adviser_investor_links,
+                backfill_adviser_login_usernames,
             )
             ensure_adviser_investor_id_column(db)
+            ensure_adviser_login_username_column(db)
             backfill_adviser_investor_links(db)
+            backfill_adviser_login_usernames(db)
 
             try:
                 if not User.query.first():

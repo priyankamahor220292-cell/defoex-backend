@@ -1,9 +1,11 @@
 """
 Resolve a Member (investor) from any known ID format:
-  - DFX-2026-000005  → investor_id (Member)
-  - DFX-2026-000002  → adviser_code (Adviser) → linked Member
-  - DEFAD202605      → login username (User) → Adviser → Member
+  - DEFIN202601      → investor_id (Member)
+  - DEFAD202601      → adviser_code OR adviser login username → linked Member
+  - DFX-2026-000002  → adviser_code (legacy) → linked Member
 """
+
+from datetime import datetime
 
 from extensions import db
 from models.member import Member
@@ -20,6 +22,46 @@ def _looks_like_mobile(code):
     """True only for 10-digit Indian mobile numbers."""
     digits = normalize_mobile(code)
     return len(digits) == 10 and digits[0] in '6789'
+
+
+def _pick_best_match(candidates, adviser=None, user=None):
+    """Pick one record when multiple name/mobile matches exist."""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    branch_id = None
+    if adviser and adviser.branch_id:
+        branch_id = adviser.branch_id
+    elif user and user.branch_id:
+        branch_id = user.branch_id
+
+    if branch_id:
+        branch_matches = [c for c in candidates if c.branch_id == branch_id]
+        if len(branch_matches) == 1:
+            return branch_matches[0]
+        if branch_matches:
+            candidates = branch_matches
+
+    candidates.sort(
+        key=lambda c: c.created_at or datetime.min,
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def find_adviser_by_code_or_login(code):
+    """Find adviser by adviser_code or stored login username."""
+    if not code:
+        return None
+    key = str(code).strip().upper()
+    return Adviser.query.filter(
+        db.or_(
+            db.func.upper(Adviser.adviser_code) == key,
+            db.func.upper(Adviser.login_username) == key,
+        )
+    ).first()
 
 
 def find_member_for_adviser(adviser):
@@ -59,46 +101,18 @@ def find_member_for_adviser(adviser):
         matches = _approved_members().filter(
             db.func.lower(Member.email) == email
         ).all()
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            if adviser.mobile:
-                mobile_match = next(
-                    (m for m in matches if m.mobile == adviser.mobile), None
-                )
-                if mobile_match:
-                    return mobile_match
-            if adviser.branch_id:
-                branch_matches = [
-                    m for m in matches if m.branch_id == adviser.branch_id
-                ]
-                if len(branch_matches) == 1:
-                    return branch_matches[0]
-            matches.sort(
-                key=lambda m: m.created_at or __import__('datetime').datetime.min,
-                reverse=True,
-            )
-            return matches[0]
+        picked = _pick_best_match(matches, adviser=adviser)
+        if picked:
+            return picked
 
     if adviser.full_name:
         name = adviser.full_name.strip().lower()
         matches = _approved_members().filter(
             db.func.lower(Member.full_name) == name
         ).all()
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            if adviser.branch_id:
-                branch_matches = [m for m in matches if m.branch_id == adviser.branch_id]
-                if len(branch_matches) == 1:
-                    return branch_matches[0]
-                if branch_matches:
-                    matches = branch_matches
-            matches.sort(
-                key=lambda m: m.created_at or __import__('datetime').datetime.min,
-                reverse=True,
-            )
-            return matches[0]
+        picked = _pick_best_match(matches, adviser=adviser)
+        if picked:
+            return picked
 
     return None
 
@@ -108,17 +122,30 @@ def find_adviser_for_user(user):
     if not user:
         return None
 
+    uname = (user.username or '').strip().upper()
+
+    if uname:
+        adviser = find_adviser_by_code_or_login(uname)
+        if adviser:
+            return adviser
+
     if user.mobile:
         adviser = Adviser.query.filter_by(mobile=user.mobile).first()
         if adviser:
             return adviser
+        norm = normalize_mobile(user.mobile)
+        for candidate in Adviser.query.filter(Adviser.mobile.isnot(None)).all():
+            if normalize_mobile(candidate.mobile) == norm:
+                return candidate
 
     if user.full_name:
-        adviser = Adviser.query.filter(
-            db.func.lower(Adviser.full_name) == user.full_name.strip().lower()
-        ).first()
-        if adviser:
-            return adviser
+        name = user.full_name.strip().lower()
+        matches = Adviser.query.filter(
+            db.func.lower(Adviser.full_name) == name
+        ).all()
+        picked = _pick_best_match(matches, user=user)
+        if picked:
+            return picked
 
     if user.email:
         email = user.email.strip().lower()
@@ -128,13 +155,22 @@ def find_adviser_for_user(user):
         if adviser:
             return adviser
 
+        # Login emails are generated as defad202601@defoex.com at approval time
+        if uname.startswith('DEFAD') and email == f'{uname.lower()}@defoex.com':
+            matches = Adviser.query.filter(
+                db.func.lower(Adviser.full_name) == user.full_name.strip().lower()
+            ).all() if user.full_name else []
+            picked = _pick_best_match(matches, user=user)
+            if picked:
+                return picked
+
     return None
 
 
 def link_adviser_investor(adviser, commit=False):
     """Persist adviser.investor_id when a unique member match exists."""
     if not adviser or getattr(adviser, 'investor_id', None):
-        return None
+        return find_member_for_adviser(adviser) if adviser else None
 
     member = find_member_for_adviser(adviser)
     if member:
@@ -142,6 +178,34 @@ def link_adviser_investor(adviser, commit=False):
         if commit:
             db.session.commit()
     return member
+
+
+def _adviser_member_error(adviser, code):
+    """Build a helpful error when adviser exists but investor profile is missing."""
+    hint = ''
+    same_name = _approved_members().filter(
+        db.func.lower(Member.full_name) == adviser.full_name.strip().lower()
+    ).all() if adviser.full_name else []
+    if same_name:
+        ids = ', '.join(m.investor_id for m in same_name[:3])
+        hint = f' Try investor ID: {ids}.'
+
+    pending = None
+    if adviser.mobile:
+        pending = Member.query.filter(
+            Member.mobile == adviser.mobile,
+            Member.approval_status == 'Pending',
+        ).first()
+    if pending:
+        return (
+            f'"{code}" is adviser {adviser.full_name}. Investor registration '
+            f'({pending.investor_id}) is pending approval.{hint}'
+        )
+
+    return (
+        f'"{code}" is adviser {adviser.full_name}, but no approved investor '
+        f'profile is linked yet.{hint} Register them as an investor first.'
+    )
 
 
 def resolve_member_from_code(raw_code):
@@ -153,6 +217,8 @@ def resolve_member_from_code(raw_code):
         return None, 'Investor ID / Adviser ID / Login ID is required'
 
     code = str(raw_code).strip().upper()
+    user = None
+    adviser = None
 
     member = Member.query.filter(
         db.func.upper(Member.investor_id) == code
@@ -162,23 +228,13 @@ def resolve_member_from_code(raw_code):
     if member:
         return _ensure_approved(member, code)
 
-    user = User.query.filter(db.func.upper(User.username) == code).first()
-    if user:
-        adviser = find_adviser_for_user(user)
-        if adviser:
-            member = find_member_for_adviser(adviser)
-            if member:
-                link_adviser_investor(adviser)
-                return _ensure_approved(member, code)
-        return None, (
-            f'Login ID "{code}" belongs to {user.full_name or "a user"}, '
-            f'but no approved investor record is linked. '
-            f'Register them as an investor first or use their Investor ID.'
-        )
+    adviser = find_adviser_by_code_or_login(code)
 
-    adviser = Adviser.query.filter(
-        db.func.upper(Adviser.adviser_code) == code
-    ).first()
+    if not adviser:
+        user = User.query.filter(db.func.upper(User.username) == code).first()
+        if user:
+            adviser = find_adviser_for_user(user)
+
     if adviser:
         member = find_member_for_adviser(adviser)
         if member:
@@ -187,16 +243,13 @@ def resolve_member_from_code(raw_code):
             except Exception:
                 db.session.rollback()
             return _ensure_approved(member, code)
-        hint = ''
-        same_name = _approved_members().filter(
-            db.func.lower(Member.full_name) == adviser.full_name.strip().lower()
-        ).all() if adviser.full_name else []
-        if same_name:
-            ids = ', '.join(m.investor_id for m in same_name[:3])
-            hint = f' Try investor ID: {ids}.'
+        return None, _adviser_member_error(adviser, code)
+
+    if user:
         return None, (
-            f'"{code}" is adviser {adviser.full_name}, but no approved investor '
-            f'profile is linked yet.{hint} Register them as an investor first.'
+            f'Login ID "{code}" belongs to {user.full_name or "a user"}, '
+            f'but no adviser or approved investor record is linked. '
+            f'Register them as an investor first or use their Investor ID.'
         )
 
     return None, f'No investor or adviser found for "{code}"'
