@@ -116,107 +116,136 @@ def create_branch():
 
 @branches_bp.route('/admin-wallet', methods=['GET'])
 @jwt_required()
-def get_admin_wallet():
+def admin_wallet_status():
+    from sqlalchemy import text as st
     claims = get_jwt()
     if claims.get('role') != 'superadmin':
         return jsonify(error_response('Unauthorized', 403)[0]), 403
-    try:
-        aw = _ensure_admin_wallet()
+
+    TOTAL_LIMIT = 1_000_000_000  # ₹1,00,00,00,000 fixed
+
+    aw = AdminWallet.query.first()
+    if not aw:
+        aw = AdminWallet(total_limit=TOTAL_LIMIT, total_distributed=0, total_returned=0)
+        db.session.add(aw)
         db.session.commit()
 
-        branches = Branch.query.filter_by(is_active=True).all()
-        branch_wallets = []
-        for b in branches:
-            w = BranchWallet.query.filter_by(branch_id=b.id).first()
-            branch_wallets.append({
-                'branch_id':       b.id,
-                'branch_code':     b.branch_code,
-                'branch_name':     b.branch_name,
-                'current_balance': float(w.current_balance or 0) if w else 0,
-                'cash_wallet':     float(w.cash_wallet or 0) if w else 0,
-                'is_low_balance':  w.is_low_balance if w else False,
-            })
+    # Correct columns: total_limit, total_distributed, total_returned
+    # available = total_limit - total_distributed + total_returned
+    aw.total_limit = TOTAL_LIMIT
+    db.session.commit()
 
-        try:
-            txns = WalletTransaction.query\
-                .order_by(WalletTransaction.created_at.desc()).limit(50).all()
-            txn_list = [t.to_dict() for t in txns]
-        except Exception:
-            txn_list = []
+    limit    = float(aw.total_limit or TOTAL_LIMIT)
+    dist     = float(aw.total_distributed or 0)
+    ret      = float(aw.total_returned or 0)
+    avail    = limit - dist + ret
+    used_pct = round((dist / limit) * 100, 2) if limit > 0 else 0
 
-        return jsonify(success_response({
-            'admin_wallet':   aw.to_dict() if aw else None,
-            'branch_wallets': branch_wallets,
-            'transactions':   txn_list,
-        })[0]), 200
-    except Exception as e:
-        print(traceback.format_exc())
-        return jsonify(error_response(str(e))[0]), 500
+    branches = Branch.query.all()
+    branch_wallets = []
+    for b in branches:
+        bw = BranchWallet.query.filter_by(branch_id=b.id).first()
+        branch_wallets.append({
+            'branch_id':       b.id,
+            'branch_name':     b.branch_name,
+            'branch_code':     b.branch_code,
+            'current_balance': float(bw.current_balance) if bw else 0,
+            'cash_wallet':     float(bw.cash_wallet)     if bw else 0,
+            'is_low_balance':  bw.is_low_balance         if bw else False,
+        })
 
+    # Transactions for history
+    txns = WalletTransaction.query.order_by(
+        WalletTransaction.created_at.desc()).limit(100).all()
+
+    return jsonify(success_response({
+        'admin_wallet': {
+            'total_limit':       limit,
+            'total_distributed': dist,
+            'total_returned':    ret,
+            'available_balance': avail,
+            'used_amount':       dist - ret,
+            'use_percentage':    used_pct,
+            'is_low_balance':    avail < float(aw.low_balance_threshold or 0),
+        },
+        'branch_wallets': branch_wallets,
+        'transactions':   [t.to_dict() for t in txns],
+    })[0]), 200
 
 @branches_bp.route('/<int:branch_id>/topup', methods=['POST'])
 @jwt_required()
-def topup_wallet(branch_id):
+def topup_branch_wallet(branch_id):
+    from sqlalchemy import text as st
     claims = get_jwt()
     if claims.get('role') != 'superadmin':
         return jsonify(error_response('Unauthorized', 403)[0]), 403
 
-    identity = get_jwt_identity()
-    data     = request.get_json() or {}
-    try:
-        amount = float(data.get('amount', 0))
-    except (TypeError, ValueError):
-        amount = 0
+    data   = request.get_json() or {}
+    amount = float(data.get('amount', 0))
+    desc   = data.get('description', 'Admin top-up')
+
+    # FIX: max ₹1,00,00,00,000 per transaction
+    MAX_TXN     = 1_000_000_000
+    TOTAL_LIMIT = 1_000_000_000
+
     if amount <= 0:
         return jsonify(error_response('Amount must be positive')[0]), 400
+    if amount > MAX_TXN:
+        return jsonify(error_response('Maximum transaction is ₹1,00,00,00,000')[0]), 400
 
-    Branch.query.get_or_404(branch_id)
+    branch = Branch.query.get_or_404(branch_id)
+    aw     = AdminWallet.query.first()
+    if not aw:
+        aw = AdminWallet(total_limit=TOTAL_LIMIT, total_distributed=0, total_returned=0)
+        db.session.add(aw)
+        db.session.flush()
 
+    # Use correct columns: available = total_limit - total_distributed + total_returned
+    avail = float(aw.total_limit or TOTAL_LIMIT) - float(aw.total_distributed or 0) + float(aw.total_returned or 0)
+
+    # FIX: prevent negative balance
+    if avail < amount:
+        return jsonify(error_response(
+            f'Insufficient admin balance. Available: ₹{avail:,.0f}'
+        )[0]), 400
+
+    # Get or create branch wallet
+    bw = BranchWallet.query.filter_by(branch_id=branch_id).first()
+    if not bw:
+        bw = BranchWallet(branch_id=branch_id, current_balance=0, cash_wallet=0)
+        db.session.add(bw)
+        db.session.flush()
+
+    # Update admin wallet — use correct column: total_distributed
+    aw.total_distributed = float(aw.total_distributed or 0) + amount
+
+    # Update branch wallet
+    bw.current_balance = float(bw.current_balance or 0) + amount
+
+    # Log transaction
     try:
-        aw = _ensure_admin_wallet()
-        if aw and aw.available_balance < amount:
-            return jsonify(error_response(
-                f'Admin wallet insufficient. Available: {aw.available_balance:,.0f}'
-            )[0]), 400
-
-        # Update admin wallet
-        if aw:
-            aw.total_distributed = float(aw.total_distributed or 0) + amount
-
-        # Update branch wallet
-        wallet = _ensure_wallet(branch_id)
-        wallet.current_balance = float(wallet.current_balance or 0) + amount
-
-        # Record transaction using raw SQL to avoid Enum issues
-        from datetime import datetime
-        db.session.execute(
-            text("""INSERT INTO wallet_transactions
-                    (branch_id, transaction_type, amount, description,
-                     balance_after, cash_wallet_after, created_by, created_at)
-                    VALUES (:bid, :ttype, :amt, :desc,
-                            :bal, :cash, :by, :at)"""),
-            {
-                'bid':   branch_id,
-                'ttype': 'TopUp',
-                'amt':   amount,
-                'desc':  data.get('description') or 'Admin top-up',
-                'bal':   float(wallet.current_balance),
-                'cash':  float(wallet.cash_wallet or 0),
-                'by':    int(identity),
-                'at':    datetime.utcnow(),
-            }
-        )
-        db.session.commit()
-        return jsonify(success_response(
-            wallet.to_dict(),
-            f'Added successfully to branch wallet'
-        )[0]), 200
-
+        db.session.execute(st("""
+            INSERT INTO wallet_transactions
+                (branch_id, transaction_type, amount, description,
+                 balance_after, cash_wallet_after, created_at)
+            VALUES (:bid, 'TopUp', :amt, :desc, :bal, :cash, NOW())
+        """), {
+            'bid': branch_id, 'amt': amount, 'desc': desc,
+            'bal': float(bw.current_balance),
+            'cash': float(bw.cash_wallet or 0),
+        })
     except Exception as e:
-        db.session.rollback()
-        print(traceback.format_exc())
-        return jsonify(error_response(f'Top-up failed: {str(e)}')[0]), 500
+        print(f"Txn log error: {e}")
 
+    db.session.commit()
+
+    new_avail = avail - amount
+    return jsonify(success_response({
+        'branch_name':    branch.branch_name,
+        'amount_added':   amount,
+        'branch_balance': float(bw.current_balance),
+        'admin_balance':  new_avail,
+    }, f'₹{amount:,.0f} sent to {branch.branch_name}')[0]), 200
 
 @branches_bp.route('/<int:branch_id>/wallet-history', methods=['GET'])
 @jwt_required()

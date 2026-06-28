@@ -1,592 +1,595 @@
+"""
+investment_plan.py  — DefOex IntraTech Backend
+Routes for: MIS Plan, SIS Plan, MIS Contribution, Approve Investment
+
+Fixes & Features in this version:
+  1. get-investor-details → accepts investor_id OR adviser_id
+     AND accepts status == 'approved' OR 'active'
+  2. Plan amount must be a multiple of ₹1,000 (min ₹1,000)
+     [Old 10rs plan bug: FIXED — minimum is now ₹1,000]
+  3. UPI payment: transaction_id (alphanumeric, max 35 chars) + upi_app
+     stored when payment_mode == 'UPI'
+  4. Cash payment: no extra fields required
+  5. MIS/SIS/MIS-Contribution all share same UPI logic
+"""
+
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
+import re
+
+from extensions import db
 from models.investment import Investment, Installment, MIS_PLANS, SIS_PLANS
 from models.member import Member
 from models.branch import Branch
-from models.branch_wallet import BranchWallet, WalletTransaction
-from models.adviser import Adviser
-from models.commission import Commission, MIS_COMMISSION_RATES
-from models.notification import Notification
-from extensions import db
-from utils.helpers import generate_irn, success_response, error_response
-from datetime import date, datetime
-from dateutil.relativedelta import relativedelta
-import traceback
+from models.user import User
+from utils.helpers import success_response, error_response
 
-investment_plan_bp = Blueprint('investment_plan', __name__, url_prefix='/api/investment-plans')
+investment_plan_bp = Blueprint('investment_plan', __name__)
 
+# ─── Constants ───────────────────────────────────────────────────────────────
+VALID_UPI_APPS = {'phonepe', 'paytm', 'gpay', 'googlepay', 'bhim', 'other'}
+TRANSACTION_ID_RE = re.compile(r'^[A-Za-z0-9]{1,35}$')
+MIN_PLAN_AMOUNT = Decimal('1000')
 
-def safe_date(val):
-    if not val:
-        return None
-    try:
-        if '/' in str(val):
-            return datetime.strptime(str(val), '%m/%d/%Y').date()
-        return date.fromisoformat(str(val))
-    except Exception:
-        return None
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
-
-def get_or_create_wallet(branch_id):
-    """Always returns a wallet — creates one if missing"""
-    if not branch_id:
-        return None
-    wallet = BranchWallet.query.filter_by(branch_id=branch_id).first()
-    if not wallet:
-        wallet = BranchWallet(
-            branch_id=branch_id,
-            current_balance=0,
-            cash_wallet=0,
-            low_balance_threshold=10000
-        )
-        db.session.add(wallet)
-        db.session.flush()
-    return wallet
-
-
-def resolve_branch_id(claims, data=None):
+def _validate_amount(amount_raw):
     """
-    Get branch_id from:
-    1. JWT claims (for branchmanager)
-    2. Request body branch_id (for superadmin)
-    3. Investor's branch (fallback)
+    Validate that amount is a positive integer multiple of 1000.
+    Returns (Decimal, None) on success or (None, error_str) on failure.
     """
-    branch_id = claims.get('branch_id')
-    if branch_id:
-        return branch_id
-    # Superadmin — try from request body or investor
-    if data:
-        body_branch = data.get('branch_id')
-        if body_branch:
-            return int(body_branch)
-    return None
-
-
-def _create_commission(investment, adviser):
     try:
-        rate_table = MIS_COMMISSION_RATES.get(adviser.rank_name, {})
-        rate = rate_table.get(investment.plan_tenure, 0)
-        if rate and investment.total_investment_amount:
-            comm = Commission(
-                investment_id=investment.id,
-                adviser_code=adviser.adviser_code,
-                adviser_rank=adviser.rank_name,
-                plan_type=investment.plan_type,
-                plan_tenure=investment.plan_tenure,
-                investment_amount=investment.total_investment_amount,
-                commission_rate=rate,
-                commission_amount=float(investment.total_investment_amount) * rate / 100
-            )
-            db.session.add(comm)
-    except Exception as e:
-        print(f"Commission calc error: {e}")
-
-
-@investment_plan_bp.route('/create', methods=['POST'])
-@jwt_required()
-def create_plan():
-    claims = get_jwt()
-    data = request.get_json() or {}
-
-    investor_id    = str(data.get('investor_id', '')).strip()
-    plan_tenure    = str(data.get('plan_tenure', '')).strip()
-    monthly_amount = data.get('monthly_amount')
-
-    if not investor_id:
-        return jsonify(error_response('investor_id is required')[0]), 400
-
-    # Determine plan type (MIS or SIS)
-    plan_type = str(data.get('plan_type', 'MIS')).upper()
-
-    # Validate tenure and get plan definition
-    if plan_type == 'SIS':
-        if not plan_tenure:
-            plan_tenure = '7.5Y'
-        plan = SIS_PLANS.get(plan_tenure) or SIS_PLANS.get('7.5Y')
-        if not plan:
-            return jsonify(error_response('Invalid SIS plan tenure')[0]), 400
-    else:
-        plan_type = 'MIS'
-        if not plan_tenure or plan_tenure not in MIS_PLANS:
-            return jsonify(error_response('plan_tenure must be 3Y, 5Y, or 7Y')[0]), 400
-        plan = MIS_PLANS[plan_tenure]
-
-    try:
-        monthly_amount = float(monthly_amount)
-        if monthly_amount <= 0:
+        amount = Decimal(str(amount_raw))
+        if amount <= 0:
             raise ValueError
-    except (TypeError, ValueError):
-        return jsonify(error_response('monthly_amount must be a positive number')[0]), 400
+    except (TypeError, ValueError, InvalidOperation):
+        return None, 'Amount must be a positive number'
 
-    # Validate investor — try exact match first, then fallback formats
-    member = Member.query.filter_by(investor_id=investor_id, approval_status='Approved').first()
+    if amount < MIN_PLAN_AMOUNT:
+        return None, f'Minimum investment amount is ₹1,000'
 
-    # Try old format fallback: INV2026091192 → DFX-2026-091192 style
-    if not member and not investor_id.startswith('DFX-'):
-        # Try searching by mobile or partial match
+    if amount % 1000 != 0:
+        return None, 'Investment amount must be a multiple of ₹1,000 (e.g. ₹1,000 / ₹2,000 / ₹5,000)'
+
+    return amount, None
+
+
+def _validate_upi_fields(data: dict):
+    """
+    Validate UPI-specific fields when payment_mode is 'UPI'.
+    Returns (transaction_id, upi_app, None) on success or (None, None, error_str).
+    """
+    transaction_id = (data.get('transaction_id') or '').strip()
+    upi_app = (data.get('upi_app') or '').strip().lower()
+
+    if not transaction_id:
+        return None, None, 'Transaction ID is required for UPI payment'
+
+    if not TRANSACTION_ID_RE.match(transaction_id):
+        return None, None, (
+            'Transaction ID must be alphanumeric (letters and digits only), '
+            'maximum 35 characters'
+        )
+
+    if not upi_app:
+        return None, None, 'UPI App is required (PhonePe / Paytm / GPay)'
+
+    if upi_app not in VALID_UPI_APPS:
+        return None, None, (
+            f'Invalid UPI App "{upi_app}". '
+            f'Allowed: PhonePe, Paytm, GPay, BHIM, Other'
+        )
+
+    return transaction_id, upi_app, None
+
+
+def _get_member_by_any_id(member_id: str):
+    """
+    Look up a Member by investor_id OR adviser_id.
+    Accepts status: 'approved' or 'active'.
+    Returns (member, None) or (None, error_string).
+    """
+    if not member_id:
+        return None, 'Investor ID / Adviser ID is required'
+
+    member_id = member_id.strip().upper()
+
+    # Try investor_id first
+    member = Member.query.filter(
+        db.func.upper(Member.investor_id) == member_id
+    ).first()
+
+    # Try adviser_id if not found as investor
+    if not member:
         member = Member.query.filter(
-            Member.investor_id.ilike(f'%{investor_id[-6:]}%'),
-            Member.approval_status == 'Approved'
+            db.func.upper(Member.adviser_id) == member_id
         ).first()
 
     if not member:
-        # Show available investor IDs to help debug
-        sample = [m.investor_id for m in Member.query.filter_by(approval_status='Approved').limit(5).all()]
-        hint = f' Available IDs: {", ".join(sample)}' if sample else ' No approved investors found.'
-        return jsonify(error_response(
-            f'Investor "{investor_id}" not found or not yet approved.{hint}'
-        )[0]), 404
+        return None, f'Member "{member_id}" not found'
 
-    # Resolve branch_id — BM gets it from JWT, superadmin gets it from investor's branch
-    branch_id = resolve_branch_id(claims, data)
-    if not branch_id:
-        # Fall back to investor's branch
-        branch_id = member.branch_id
-    if not branch_id:
-        # Last fallback: first active branch
-        first_branch = Branch.query.filter_by(is_active=True).first()
-        if first_branch:
-            branch_id = first_branch.id
+    allowed_statuses = {'approved', 'active'}
+    member_status = (member.status or '').lower().strip()
+    if member_status not in allowed_statuses:
+        return None, (
+            f'Member "{member_id}" is not approved yet '
+            f'(current status: {member.status or "unknown"}). '
+            f'Please approve the member first before creating a plan.'
+        )
 
-    if not branch_id:
-        return jsonify(error_response('Cannot determine branch. Please set branch_id in request.')[0]), 400
+    return member, None
 
-    # Get or create wallet
-    wallet = get_or_create_wallet(branch_id)
-    if not wallet:
-        return jsonify(error_response('Could not create branch wallet')[0]), 500
 
-    # SIS: monthly_amount IS the lump sum. MIS: monthly × months
-    if plan_type == 'SIS':
-        total_amount = monthly_amount  # lump sum upfront
+def _get_current_branch():
+    """Get the branch of the currently logged-in branch manager."""
+    identity = get_jwt_identity()
+    # identity may be user_id (int) or username (str)
+    if isinstance(identity, int):
+        user = User.query.get(identity)
     else:
-        total_amount = monthly_amount * plan['months']
+        user = User.query.filter_by(username=identity).first()
 
-    if float(wallet.current_balance or 0) < total_amount:
-        available = float(wallet.current_balance or 0)
-        return jsonify(error_response(
-            f'CURRENT BALANCE LOW. Required: ₹{total_amount:,.0f}, Available: ₹{available:,.0f}. '
-            f'Ask admin to top up the branch wallet first.'
-        )[0]), 400
+    if not user or not user.branch_id:
+        return None, 'Branch manager account not found'
 
-    investment_date = safe_date(data.get('investment_date')) or date.today()
+    branch = Branch.query.get(user.branch_id)
+    if not branch:
+        return None, 'Branch not found'
+
+    return branch, None
+
+
+# ─── GET INVESTOR / ADVISER DETAILS ──────────────────────────────────────────
+
+@investment_plan_bp.route('/get-investor-details/<member_id>', methods=['GET'])
+@jwt_required()
+def get_investor_details(member_id):
+    """
+    Fetch member info for the MIS / SIS plan creation form.
+    Accepts investor_id OR adviser_id.
+    Member must be approved or active.
+    """
+    member, err = _get_member_by_any_id(member_id)
+    if err:
+        return jsonify({'success': False, 'message': err}), 404
+
+    # Try to get adviser name
+    adviser_name = None
+    if member.adviser_id:
+        adviser = Member.query.filter(
+            db.func.upper(Member.investor_id) == member.adviser_id.strip().upper()
+        ).first()
+        if adviser:
+            adviser_name = adviser.full_name
+
+    data = {
+        'investor_id':      member.investor_id,
+        'adviser_id':       member.adviser_id,
+        'full_name':        member.full_name,
+        'father_name':      getattr(member, 'father_name', None),
+        'mobile':           member.mobile,
+        'adviser_name':     adviser_name,
+        'nominee_name':     getattr(member, 'nominee_name', None),
+        'nominee_relation': getattr(member, 'nominee_relation', None),
+        'status':           member.status,
+    }
+
+    return jsonify({'success': True, 'data': data, 'message': 'Member details fetched'}), 200
+
+
+# ─── CREATE MIS PLAN ─────────────────────────────────────────────────────────
+
+@investment_plan_bp.route('/create-mis', methods=['POST'])
+@jwt_required()
+def create_mis_plan():
+    """
+    Create a new MIS Plan.
+
+    JSON body:
+      investor_id    : str   (investor_id or adviser_id)
+      plan_tenure    : str   ('3Y', '5Y', '7Y')
+      monthly_amount : int   (must be multiple of 1000, min 1000)
+      payment_mode   : str   ('Cash' or 'UPI')
+      transaction_id : str   (required if UPI, alphanumeric, max 35)
+      upi_app        : str   (required if UPI: phonepe/paytm/gpay/bhim/other)
+      investment_date: str   (YYYY-MM-DD, optional — defaults to today)
+    """
+    data = request.get_json(force=True) or {}
+
+    # 1. Validate member
+    member, err = _get_member_by_any_id(data.get('investor_id', ''))
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
+
+    # 2. Validate tenure
+    plan_tenure = (data.get('plan_tenure') or '').strip().upper()
+    if plan_tenure not in MIS_PLANS:
+        return jsonify({'success': False,
+                        'message': f'Invalid MIS tenure. Choose: {", ".join(MIS_PLANS.keys())}'}), 400
+
+    # 3. Validate amount
+    amount, err = _validate_amount(data.get('monthly_amount'))
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
+
+    # 4. Payment mode & UPI fields
+    payment_mode = (data.get('payment_mode') or 'Cash').strip()
+    transaction_id, upi_app = None, None
+
+    if payment_mode.upper() == 'UPI':
+        transaction_id, upi_app, err = _validate_upi_fields(data)
+        if err:
+            return jsonify({'success': False, 'message': err}), 400
+
+    # 5. Investment date
+    investment_date = date.today()
+    if data.get('investment_date'):
+        try:
+            investment_date = datetime.strptime(data['investment_date'], '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'success': False, 'message': 'Invalid investment_date format (use YYYY-MM-DD)'}), 400
+
+    # 6. Get branch
+    branch, err = _get_current_branch()
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
 
     try:
-        irn = generate_irn()
+        plan_info = MIS_PLANS[plan_tenure]
+        months = plan_info['months']
+        total_investment = amount * months
+        roi_num = plan_info['roi_num']
+        roi_den = plan_info['roi_den']
+        maturity = (total_investment * roi_num / roi_den).to_integral_value(rounding=ROUND_HALF_UP)
+        maturity_date = investment_date + relativedelta(months=months)
+
         investment = Investment(
-            irn=irn,
-            investor_id=investor_id,
-            branch_id=branch_id,
-            plan_type='MIS',
-            plan_tenure=plan_tenure,
-            investment_date=investment_date,
-            monthly_amount=monthly_amount,
-            plan_fee=float(data.get('plan_fee') or 0),
-            payment_mode=data.get('payment_mode') or 'Cash',
-            company_account=data.get('company_account') or None,
-            adviser_code=member.adviser_code,
-            approval_status='Pending'
+            member_id       = member.id,
+            investor_id     = member.investor_id,
+            adviser_id      = member.adviser_id,
+            branch_id       = branch.id,
+            plan_type       = 'MIS',
+            plan_tenure     = plan_tenure,
+            plan_name       = plan_info['label'],
+            monthly_amount  = float(amount),
+            total_installments      = months,
+            total_investment_amount = float(total_investment),
+            total_maturity_amount   = float(maturity),
+            roi_percentage          = float(plan_info['roi_pct']),
+            investment_date         = investment_date,
+            maturity_date           = maturity_date,
+            payment_mode            = payment_mode,
+            transaction_id          = transaction_id,
+            upi_app                 = upi_app,
+            status                  = 'pending',
         )
-        investment.calculate_plan()
+        db.session.add(investment)
+        db.session.flush()  # get investment.id
+
+        # Create first installment record
+        inst = Installment(
+            investment_id   = investment.id,
+            installment_no  = 1,
+            due_date        = investment_date,
+            amount          = float(amount),
+            payment_mode    = payment_mode,
+            transaction_id  = transaction_id,
+            upi_app         = upi_app,
+            status          = 'pending',
+        )
+        db.session.add(inst)
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': f'MIS Plan created successfully for {member.full_name}. Pending approval.',
+            'data': {
+                'investment_id':         investment.id,
+                'plan_name':             investment.plan_name,
+                'monthly_amount':        float(amount),
+                'total_installments':    months,
+                'total_investment':      float(total_investment),
+                'maturity_amount':       float(maturity),
+                'investment_date':       investment_date.isoformat(),
+                'maturity_date':         maturity_date.isoformat(),
+                'payment_mode':          payment_mode,
+            }
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Failed to create MIS Plan: {str(e)}'}), 500
+
+
+# ─── CREATE SIS PLAN ─────────────────────────────────────────────────────────
+
+@investment_plan_bp.route('/create-sis', methods=['POST'])
+@jwt_required()
+def create_sis_plan():
+    """
+    Create a new SIS Plan (lump sum, 7.5 Year, amount doubles at maturity).
+
+    JSON body:
+      investor_id    : str
+      lump_amount    : int   (must be multiple of 1000, min 1000)
+      payment_mode   : str   ('Cash' or 'UPI')
+      transaction_id : str   (required if UPI)
+      upi_app        : str   (required if UPI)
+      investment_date: str   (YYYY-MM-DD, optional)
+    """
+    data = request.get_json(force=True) or {}
+
+    member, err = _get_member_by_any_id(data.get('investor_id', ''))
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
+
+    amount, err = _validate_amount(data.get('lump_amount'))
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
+
+    payment_mode = (data.get('payment_mode') or 'Cash').strip()
+    transaction_id, upi_app = None, None
+    if payment_mode.upper() == 'UPI':
+        transaction_id, upi_app, err = _validate_upi_fields(data)
+        if err:
+            return jsonify({'success': False, 'message': err}), 400
+
+    investment_date = date.today()
+    if data.get('investment_date'):
+        try:
+            investment_date = datetime.strptime(data['investment_date'], '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'success': False, 'message': 'Invalid investment_date format'}), 400
+
+    branch, err = _get_current_branch()
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
+
+    try:
+        # SIS: 7.5 years, maturity = amount × 2
+        plan_info = SIS_PLANS.get('7.5Y') or SIS_PLANS.get('7Y')
+        months = plan_info['months']        # 90
+        maturity = amount * 2
+        maturity_date = investment_date + relativedelta(months=months)
+
+        investment = Investment(
+            member_id       = member.id,
+            investor_id     = member.investor_id,
+            adviser_id      = member.adviser_id,
+            branch_id       = branch.id,
+            plan_type       = 'SIS',
+            plan_tenure     = '7.5Y',
+            plan_name       = 'SIS 7.5 Year Plan',
+            monthly_amount  = float(amount),   # lump sum stored here
+            total_installments      = 1,
+            total_investment_amount = float(amount),
+            total_maturity_amount   = float(maturity),
+            roi_percentage          = 100.0,   # 100% gain
+            investment_date         = investment_date,
+            maturity_date           = maturity_date,
+            payment_mode            = payment_mode,
+            transaction_id          = transaction_id,
+            upi_app                 = upi_app,
+            status                  = 'pending',
+        )
         db.session.add(investment)
         db.session.flush()
 
-        for i in range(1, plan['months'] + 1):
-            inst = Installment(
-                investment_id=investment.id,
-                investor_id=investor_id,
-                installment_number=i,
-                due_date=investment_date + relativedelta(months=i),
-                amount=monthly_amount,
-                status='Pending'
-            )
-            db.session.add(inst)
-
+        inst = Installment(
+            investment_id  = investment.id,
+            installment_no = 1,
+            due_date       = investment_date,
+            amount         = float(amount),
+            payment_mode   = payment_mode,
+            transaction_id = transaction_id,
+            upi_app        = upi_app,
+            status         = 'pending',
+        )
+        db.session.add(inst)
         db.session.commit()
-        return jsonify(success_response(investment.to_dict(), 'Investment plan created, pending approval')[0]), 201
+
+        return jsonify({
+            'success': True,
+            'message': f'SIS Plan created for {member.full_name}. Pending approval.',
+            'data': {
+                'investment_id':   investment.id,
+                'plan_name':       investment.plan_name,
+                'lump_amount':     float(amount),
+                'maturity_amount': float(maturity),
+                'investment_date': investment_date.isoformat(),
+                'maturity_date':   maturity_date.isoformat(),
+                'payment_mode':    payment_mode,
+            }
+        }), 201
 
     except Exception as e:
         db.session.rollback()
-        print("Plan create error:", traceback.format_exc())
-        return jsonify(error_response(f'Failed to create plan: {str(e)}')[0]), 500
+        return jsonify({'success': False, 'message': f'Failed to create SIS Plan: {str(e)}'}), 500
 
 
-@investment_plan_bp.route('/approve/<int:investment_id>', methods=['POST'])
+# ─── MIS CONTRIBUTION ────────────────────────────────────────────────────────
+
+@investment_plan_bp.route('/mis-contribution', methods=['POST'])
 @jwt_required()
-def approve_plan(investment_id):
-    # Auto-fix commission_status_enum if it's still a PostgreSQL Enum type
+def mis_contribution():
+    """
+    Record a monthly MIS contribution (installment payment).
+
+    JSON body:
+      investment_id  : int
+      amount         : int   (must be multiple of 1000)
+      payment_mode   : str   ('Cash' or 'UPI')
+      transaction_id : str   (required if UPI)
+      upi_app        : str   (required if UPI)
+      payment_date   : str   (YYYY-MM-DD, optional)
+    """
+    data = request.get_json(force=True) or {}
+
+    investment_id = data.get('investment_id')
+    if not investment_id:
+        return jsonify({'success': False, 'message': 'investment_id is required'}), 400
+
+    investment = Investment.query.get(investment_id)
+    if not investment:
+        return jsonify({'success': False, 'message': 'Investment plan not found'}), 404
+
+    if investment.status not in ('approved', 'active'):
+        return jsonify({'success': False,
+                        'message': 'Investment plan is not approved yet'}), 400
+
+    amount, err = _validate_amount(data.get('amount'))
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
+
+    # Validate contribution matches plan monthly amount
+    plan_monthly = Decimal(str(investment.monthly_amount))
+    if amount != plan_monthly:
+        return jsonify({
+            'success': False,
+            'message': f'Contribution amount must match plan monthly amount: ₹{int(plan_monthly):,}'
+        }), 400
+
+    payment_mode = (data.get('payment_mode') or 'Cash').strip()
+    transaction_id, upi_app = None, None
+    if payment_mode.upper() == 'UPI':
+        transaction_id, upi_app, err = _validate_upi_fields(data)
+        if err:
+            return jsonify({'success': False, 'message': err}), 400
+
+    payment_date = date.today()
+    if data.get('payment_date'):
+        try:
+            payment_date = datetime.strptime(data['payment_date'], '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'success': False, 'message': 'Invalid payment_date format'}), 400
+
     try:
-        from sqlalchemy import text as _text
-        with db.engine.connect() as _conn:
-            _conn.execute(_text("ALTER TABLE commissions ALTER COLUMN status TYPE VARCHAR(20)"))
-            _conn.execute(_text("DROP TYPE IF EXISTS commission_status_enum CASCADE"))
-            _conn.commit()
-    except Exception:
-        pass  # Already VARCHAR — ignore
-    claims = get_jwt()
-    if claims.get('role') not in ['branchmanager', 'superadmin']:
-        return jsonify(error_response('Unauthorized', 403)[0]), 403
+        # Count paid installments
+        paid_count = Installment.query.filter_by(
+            investment_id=investment_id,
+            status='paid'
+        ).count()
 
-    identity = get_jwt_identity()
-    data = request.get_json() or {}
-    action = data.get('action')
+        if paid_count >= investment.total_installments:
+            return jsonify({'success': False,
+                            'message': 'All installments have already been paid'}), 400
 
-    investment = Investment.query.get_or_404(investment_id)
-    branch_id  = investment.branch_id
+        next_inst_no = paid_count + 1
+
+        inst = Installment(
+            investment_id  = investment_id,
+            installment_no = next_inst_no,
+            due_date       = payment_date,
+            paid_date      = payment_date,
+            amount         = float(amount),
+            payment_mode   = payment_mode,
+            transaction_id = transaction_id,
+            upi_app        = upi_app,
+            status         = 'paid',
+        )
+        db.session.add(inst)
+
+        # Update investment status to active if first contribution
+        if investment.status == 'approved':
+            investment.status = 'active'
+
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': f'Installment #{next_inst_no} recorded successfully',
+            'data': {
+                'installment_no':   next_inst_no,
+                'total_paid':       next_inst_no,
+                'remaining':        investment.total_installments - next_inst_no,
+                'payment_mode':     payment_mode,
+            }
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Failed to record contribution: {str(e)}'}), 500
+
+
+# ─── APPROVE / REJECT INVESTMENT ─────────────────────────────────────────────
+
+@investment_plan_bp.route('/approve-investment/<int:investment_id>', methods=['POST'])
+@jwt_required()
+def approve_investment(investment_id):
+    """
+    Approve or reject a pending investment plan.
+
+    JSON body:
+      action  : str  ('approve' or 'reject')
+      remarks : str  (optional)
+    """
+    data = request.get_json(force=True) or {}
+    action = (data.get('action') or '').strip().lower()
+
+    if action not in ('approve', 'reject'):
+        return jsonify({'success': False, 'message': 'action must be "approve" or "reject"'}), 400
+
+    investment = Investment.query.get(investment_id)
+    if not investment:
+        return jsonify({'success': False, 'message': 'Investment not found'}), 404
+
+    if investment.status != 'pending':
+        return jsonify({'success': False,
+                        'message': f'Investment is already {investment.status}'}), 400
 
     try:
         if action == 'approve':
-            investment.approval_status = 'Approved'
-            investment.approved_by = int(identity)
-            investment.approved_at = datetime.utcnow()
-
-            if branch_id:
-                wallet = get_or_create_wallet(branch_id)
-                monthly = float(investment.monthly_amount or 0)
-                wallet.current_balance = float(wallet.current_balance or 0) - monthly
-                wallet.cash_wallet     = float(wallet.cash_wallet or 0) + monthly
-
-                txn = WalletTransaction(
-                    branch_id=branch_id,
-                    transaction_type='Deduction',
-                    amount=monthly,
-                    description=f'Plan {investment.irn} approved',
-                    reference_id=investment.irn,
-                    balance_after=wallet.current_balance,
-                    cash_wallet_after=wallet.cash_wallet,
-                    created_by=int(identity)
-                )
-                db.session.add(txn)
-
-                if float(wallet.current_balance) <= float(wallet.low_balance_threshold or 10000):
-                    notif = Notification(
-                        user_id=int(identity),
-                        branch_id=branch_id,
-                        title='⚠️ Low Balance Alert',
-                        message=f'Balance ₹{float(wallet.current_balance):,.0f}. Request top-up.',
-                        notification_type='Warning'
-                    )
-                    db.session.add(notif)
-
-            adviser = Adviser.query.filter_by(adviser_code=investment.adviser_code).first()
-            if adviser:
-                _create_commission(investment, adviser)
-
-            msg = f'Investment plan {investment.irn} approved'
-
-        elif action == 'reject':
-            investment.approval_status = 'Rejected'
-            msg = f'Investment plan {investment.irn} rejected'
+            investment.status = 'approved'
+            investment.approved_date = date.today()
+            msg = 'Investment plan approved successfully'
         else:
-            return jsonify(error_response('action must be approve or reject')[0]), 400
+            investment.status = 'rejected'
+            investment.remarks = data.get('remarks', '')
+            msg = 'Investment plan rejected'
 
         db.session.commit()
-        return jsonify(success_response(investment.to_dict(), msg)[0]), 200
+        return jsonify({'success': True, 'message': msg}), 200
 
     except Exception as e:
         db.session.rollback()
-        print("Approve error:", traceback.format_exc())
-        return jsonify(error_response(f'Failed: {str(e)}')[0]), 500
+        return jsonify({'success': False, 'message': f'Action failed: {str(e)}'}), 500
 
 
-@investment_plan_bp.route('/print/<irn>', methods=['GET'])
-@jwt_required()
-def print_irn(irn):
-    investment = Investment.query.filter_by(irn=irn).first()
-    if not investment:
-        return jsonify(error_response('IRN not found', 404)[0]), 404
-    member = Member.query.filter_by(investor_id=investment.investor_id).first()
-    return jsonify(success_response({
-        'irn': investment.irn,
-        'investor': member.to_dict() if member else None,
-        'investment': investment.to_dict(),
-        'installments_paid': investment.installments_paid,
-        'total_installments': investment.total_installments,
-        'status_label': f'{investment.installments_paid} out of {investment.total_installments}'
-    })[0]), 200
-
+# ─── LIST ALL INVESTMENTS ─────────────────────────────────────────────────────
 
 @investment_plan_bp.route('/list', methods=['GET'])
 @jwt_required()
-def list_plans():
-    claims      = get_jwt()
-    branch_id   = claims.get('branch_id')
-    page        = request.args.get('page', 1, type=int)
-    status      = request.args.get('status')
-    investor_id = request.args.get('investor_id')
+def list_investments():
+    """
+    List investments for the current branch.
+    Query params: page, per_page, plan_type, status
+    """
+    branch, err = _get_current_branch()
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
 
-    query = Investment.query
-    if claims.get('role') == 'branchmanager' and branch_id:
-        # BM strictly sees only their branch data
-        # Exclude investments linked to company owner adviser
-        from models.adviser import Adviser as AdvModel
-        owner = AdvModel.query.filter_by(is_company_owner=True).first()
-        owner_code = owner.adviser_code if owner else None
-        query = query.filter_by(branch_id=branch_id)
-        if owner_code:
-            query = query.filter(Investment.adviser_code != owner_code)
+    page     = int(request.args.get('page', 1))
+    per_page = int(request.args.get('per_page', 20))
+    plan_type = request.args.get('plan_type', '')
+    status    = request.args.get('status', '')
+
+    q = Investment.query.filter_by(branch_id=branch.id)
+    if plan_type:
+        q = q.filter_by(plan_type=plan_type.upper())
     if status:
-        query = query.filter_by(approval_status=status)
-    if investor_id:
-        query = query.filter_by(investor_id=investor_id)
+        q = q.filter_by(status=status.lower())
 
-    paginated = query.order_by(Investment.created_at.desc()).paginate(
-        page=page, per_page=20, error_out=False)
-    return jsonify(success_response({
-        'items': [i.to_dict() for i in paginated.items],
-        'total': paginated.total,
-        'pages': paginated.pages,
-        'current_page': paginated.page
-    })[0]), 200
+    q = q.order_by(Investment.created_at.desc())
+    paginated = q.paginate(page=page, per_page=per_page, error_out=False)
 
-
-@investment_plan_bp.route('/receipt/<irn>', methods=['GET'])
-@jwt_required()
-def get_receipt(irn):
-    """Full receipt data for printing — Branch Manager and Superadmin only"""
-    claims = get_jwt()
-    role = claims.get('role')
-    if role not in ['branchmanager', 'superadmin']:
-        return jsonify(error_response('Only Branch Manager can print receipts', 403)[0]), 403
-
-    investment = Investment.query.filter_by(irn=irn).first()
-    if not investment:
-        return jsonify(error_response('IRN not found', 404)[0]), 404
-
-    member = Member.query.filter_by(investor_id=investment.investor_id).first()
-
-    # Count actual paid installments from installments table
-    from models.investment import Installment
-    paid_count = Installment.query.filter_by(
-        investment_id=investment.id,
-        status='Paid'
-    ).count()
-
-    # Update investment record if count differs
-    if investment.installments_paid != paid_count:
-        investment.installments_paid = paid_count
-        db.session.commit()
-
-    # Get adviser info
-    adviser = None
-    if investment.adviser_code:
-        adv = Adviser.query.filter_by(adviser_code=investment.adviser_code).first()
-        if adv:
-            adviser = adv.to_dict()
-
-    total = investment.total_installments or 0
-    paid  = paid_count
-    remaining = total - paid
-
-    return jsonify(success_response({
-        'irn':              investment.irn,
-        'investor':         member.to_dict() if member else None,
-        'investment':       investment.to_dict(),
-        'adviser':          adviser,
-        'installments_paid': paid,
-        'total_installments': total,
-        'remaining_installments': remaining,
-        'status_label':     f'Installment {paid} of {total}',
-        'completion_pct':   round((paid / total * 100), 1) if total else 0,
-        'printed_by_role':  role,
-        'printed_at':       datetime.utcnow().isoformat(),
-    })[0]), 200
-
-
-@investment_plan_bp.route('/get-investor-details/<investor_id>', methods=['GET'])
-@jwt_required()
-def get_investor_details(investor_id):
-    """
-    Fetch investor details for MIS/SIS plan creation form.
-    Returns: Investor ID, Name, Father Name, Mobile, Adviser ID, Adviser Name, Nominee Details
-    """
-    member = Member.query.filter_by(
-        investor_id=investor_id,
-        approval_status='Approved'
-    ).first()
-    if not member:
-        return jsonify(error_response(
-            f'Investor "{investor_id}" not found or not approved yet'
-        , 404)[0]), 404
-
-    adviser = None
-    if member.adviser_code:
-        from models.adviser import Adviser
-        a = Adviser.query.filter_by(adviser_code=member.adviser_code).first()
-        if a:
-            adviser = {'adviser_code': a.adviser_code, 'full_name': a.full_name, 'rank_name': a.rank_name}
-
-    return jsonify(success_response({
-        'investor_id':    member.investor_id,
-        'investor_name':  member.full_name,
-        'father_name':    member.father_spouse_name,
-        'mobile':         member.mobile,
-        'adviser_id':     member.adviser_code,
-        'adviser_name':   adviser['full_name'] if adviser else None,
-        'adviser_rank':   adviser['rank_name'] if adviser else None,
-        'nominee_name':   member.nominee_name,
-        'nominee_relation': member.nominee_relationship,
-        'nominee_age':    member.nominee_age,
-        'city':           member.corr_city,
-        'branch_id':      member.branch_id,
-    })[0]), 200
-
-
-@investment_plan_bp.route('/mis-contribution', methods=['GET'])
-@jwt_required()
-def mis_contribution_lookup():
-    """
-    MIS Contribution — Enter Investor ID → Get Details → Show investment status.
-    Returns: investor info + all plans with installment status (1 of 36, etc.)
-    """
-    investor_id = request.args.get('investor_id', '').strip()
-    if not investor_id:
-        return jsonify(error_response('investor_id required')[0]), 400
-
-    member = Member.query.filter_by(investor_id=investor_id, approval_status='Approved').first()
-    if not member:
-        return jsonify(error_response(f'Investor "{investor_id}" not found or not approved')[0]), 404
-
-    plans = Investment.query.filter_by(
-        investor_id=investor_id, approval_status='Approved'
-    ).all()
-
-    from models.investment import Installment
-    from datetime import date
-
-    plan_list = []
-    for p in plans:
-        paid    = Installment.query.filter_by(investment_id=p.id, status='Paid').count()
-        pending = Installment.query.filter_by(investment_id=p.id, status='Pending').first()
-        total   = p.total_installments or 0
-
-        # Check if due date exceeded
-        is_overdue  = pending and pending.due_date and pending.due_date < date.today()
-        penalty_amt = 15  # ₹15 penalty if overdue
-        base_amount = float(p.monthly_amount or 0)
-        payable_amt = base_amount + penalty_amt if is_overdue else base_amount
-
-        plan_list.append({
-            **p.to_dict(),
-            'installments_paid':    paid,
-            'total_installments':   total,
-            'status_label':         f'{paid} of {total}',
-            'next_due_date':        pending.due_date.isoformat() if pending and pending.due_date else None,
-            'is_overdue':           is_overdue,
-            'base_amount':          base_amount,
-            'penalty_amount':       penalty_amt if is_overdue else 0,
-            'payable_amount':       payable_amt,
-            'payable_display':      f'\u20b9{payable_amt:,.0f}' + (f' (\u20b9{base_amount:,.0f} + \u20b9{penalty_amt} penalty)' if is_overdue else ''),
-        })
-
-    return jsonify(success_response({
-        'investor': {
-            'investor_id':   member.investor_id,
-            'investor_name': member.full_name,
-            'father_name':   member.father_spouse_name,
-            'mobile':        member.mobile,
-            'adviser_id':    member.adviser_code,
-            'nominee_name':  member.nominee_name,
-            'nominee_relation': member.nominee_relationship,
-        },
-        'plans': plan_list,
-    })[0]), 200
-
-
-@investment_plan_bp.route('/pay-installment/<int:investment_id>', methods=['POST'])
-@jwt_required()
-def pay_installment(investment_id):
-    """
-    Pay next installment for a plan.
-    Checks if overdue → adds ₹15 penalty.
-    After payment → go to Approve Investment Tab.
-    """
-    from models.investment import Installment
-    from datetime import date, datetime
-
-    claims    = get_jwt()
-    identity  = get_jwt_identity()
-    investment = Investment.query.get_or_404(investment_id)
-
-    # Get next pending installment
-    installment = Installment.query.filter_by(
-        investment_id=investment_id, status='Pending'
-    ).order_by(Installment.installment_number).first()
-
-    if not installment:
-        return jsonify(error_response('No pending installments for this plan')[0]), 400
-
-    data        = request.get_json() or {}
-    is_overdue  = installment.due_date and installment.due_date < date.today()
-    penalty     = 15 if is_overdue else 0
-    amount_paid = float(installment.amount or 0) + penalty
-
-    try:
-        installment.status    = 'Paid'
-        installment.paid_date = date.today()
-
-        paid_count = Installment.query.filter_by(
-            investment_id=investment_id, status='Paid').count()
-        investment.installments_paid = paid_count
-
-        db.session.commit()
-
-        return jsonify(success_response({
-            'installment_number': installment.installment_number,
-            'total_installments': investment.total_installments,
-            'amount_paid':        amount_paid,
-            'base_amount':        float(installment.amount or 0),
-            'penalty':            penalty,
-            'is_overdue':         is_overdue,
-            'installments_paid':  paid_count,
-            'status_label':       f'{paid_count} of {investment.total_installments}',
-            'message':            f'Payment successful! Go to Approve Investment Tab.',
-        }, f'Installment {installment.installment_number} paid — ₹{amount_paid:,.0f}')[0]), 200
-
-    except Exception as e:
-        db.session.rollback()
-        print(traceback.format_exc())
-        return jsonify(error_response(str(e))[0]), 500
-
-
-@investment_plan_bp.route('/by-irn/<irn>', methods=['GET'])
-@jwt_required()
-def get_by_irn(irn):
-    """MIS Contribution — Enter Investment ID (IRN) → Fetch full details"""
-    inv = Investment.query.filter_by(irn=irn).first()
-    if not inv:
-        return jsonify(error_response(f'Investment "{irn}" not found', 404)[0]), 404
-
-    member  = Member.query.filter_by(investor_id=inv.investor_id).first()
-    from models.investment import Installment
-    from datetime import date
-
-    paid    = Installment.query.filter_by(investment_id=inv.id, status='Paid').count()
-    pending = Installment.query.filter_by(investment_id=inv.id, status='Pending')                .order_by(Installment.installment_number).first()
-
-    is_overdue  = pending and pending.due_date and pending.due_date < date.today()
-    base        = float(inv.monthly_amount or 0)
-    penalty     = 15 if is_overdue else 0
-    payable     = base + penalty
-
-    return jsonify(success_response({
-        'investment': {
-            **inv.to_dict(),
-            'installments_paid':  paid,
-            'status_label':       f'{paid} of {inv.total_installments}',
-            'next_due_date':      pending.due_date.isoformat() if pending and pending.due_date else None,
-            'is_overdue':         bool(is_overdue),
-            'base_amount':        base,
-            'penalty_amount':     penalty,
-            'payable_amount':     payable,
-        },
-        'investor': {
-            'investor_id':       member.investor_id if member else inv.investor_id,
-            'investor_name':     member.full_name if member else None,
-            'father_name':       member.father_spouse_name if member else None,
-            'mobile':            member.mobile if member else None,
-            'adviser_id':        member.adviser_code if member else inv.adviser_code,
-            'nominee_name':      member.nominee_name if member else None,
-            'nominee_relation':  member.nominee_relationship if member else None,
-        }
-    })[0]), 200
+    return jsonify({
+        'success': True,
+        'data': [inv.to_dict() for inv in paginated.items],
+        'total':    paginated.total,
+        'page':     page,
+        'per_page': per_page,
+        'pages':    paginated.pages,
+    }), 200

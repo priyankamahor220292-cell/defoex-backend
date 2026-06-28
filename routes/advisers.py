@@ -4,7 +4,7 @@ from models.adviser import Adviser
 from models.member import Member
 from extensions import db
 from sqlalchemy import text
-from utils.helpers import generate_code, success_response, error_response
+from utils.helpers import generate_adviser_code, success_response, error_response
 import traceback
 
 advisers_bp = Blueprint('advisers', __name__, url_prefix='/api/advisers')
@@ -75,7 +75,7 @@ def create_adviser():
         code = investor.investor_id
         note = f'Investor {code} promoted to adviser — same code used for both roles.'
     else:
-        code = generate_code()
+        code = generate_adviser_code()
         note = f'New adviser created with code {code}.'
 
     try:
