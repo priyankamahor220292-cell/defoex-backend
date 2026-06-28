@@ -76,4 +76,20 @@ curl -s -o /dev/null -w "login public: HTTP %{http_code}\n" \
   -X POST http://127.0.0.1/api/auth/login \
   -H "Content-Type: application/json" -d '{}'
 
-echo "✅ Done — try http://3.110.209.154/login (rashmi / rash123)"
+echo "=== Frontend build (optional) ==="
+FRONTEND_DIR=""
+for d in "../defoex-frontend" "$HOME/defoex-frontend"; do
+  [ -f "$d/package.json" ] && FRONTEND_DIR="$(cd "$d" && pwd)" && break
+done
+if [ -n "$FRONTEND_DIR" ] && command -v npm >/dev/null 2>&1; then
+  cd "$FRONTEND_DIR"
+  [ -f .env.production ] && cp .env.production .env
+  npm ci --silent 2>/dev/null || npm install --silent
+  npm run build
+  sudo mkdir -p /var/www/defoex
+  sudo rm -rf /var/www/defoex/*
+  sudo cp -r build/* /var/www/defoex/
+  echo "Frontend deployed"
+fi
+
+echo "✅ Done — try http://3.110.209.154/login"

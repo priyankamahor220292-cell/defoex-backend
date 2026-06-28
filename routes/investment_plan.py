@@ -115,6 +115,25 @@ def _normalize_payment_mode(mode):
     return {'CASH': 'Cash', 'UPI': 'UPI', 'NEFT': 'NEFT', 'CHEQUE': 'Cheque', 'DD': 'DD'}.get(key, 'Cash')
 
 
+def _investor_id_for_user(user):
+    """Resolve investor_id for a member-role login user."""
+    if not user:
+        return None
+    uname = (user.username or '').strip().upper()
+    if uname:
+        member = Member.query.filter(
+            db.func.upper(Member.investor_id) == uname
+        ).first()
+        if member:
+            return member.investor_id
+    if user.mobile:
+        from utils.helpers import find_member_by_mobile
+        member = find_member_by_mobile(user.mobile)
+        if member:
+            return member.investor_id
+    return None
+
+
 def _get_current_branch(member=None):
     """Get branch for the logged-in branch manager (or member's branch as fallback)."""
     claims = get_jwt() or {}
@@ -606,19 +625,57 @@ def approve_investment(investment_id):
 @jwt_required()
 def list_investments():
     """
-    List investments for the current branch.
-    Query params: page, per_page, plan_type, status
+    List investments scoped by role:
+      superadmin  → all (optional branch_id query param)
+      branchmanager → current branch
+      advisor/adviser → own adviser_code
+      member      → own investor_id only
     """
-    branch, err = _get_current_branch()
-    if err:
-        return jsonify({'success': False, 'message': err}), 400
+    claims = get_jwt() or {}
+    role = (claims.get('role') or '').lower()
+    user = _get_current_user()
 
-    page     = int(request.args.get('page', 1))
-    per_page = int(request.args.get('per_page', 20))
+    page      = int(request.args.get('page', 1))
+    per_page  = int(request.args.get('per_page', 20))
     plan_type = request.args.get('plan_type', '')
     status    = request.args.get('status', '')
 
-    q = Investment.query.filter_by(branch_id=branch.id)
+    empty = {
+        'success': True,
+        'data': [],
+        'total': 0,
+        'page': page,
+        'per_page': per_page,
+        'pages': 0,
+    }
+
+    q = Investment.query
+
+    if role == 'member':
+        investor_id = _investor_id_for_user(user)
+        if not investor_id:
+            return jsonify(empty), 200
+        q = q.filter_by(investor_id=investor_id)
+    elif role == 'branchmanager':
+        branch, err = _get_current_branch()
+        if err:
+            return jsonify({'success': False, 'message': err}), 400
+        q = q.filter_by(branch_id=branch.id)
+    elif role in ('advisor', 'adviser'):
+        from utils.member_lookup import find_adviser_for_user
+        adviser = find_adviser_for_user(user)
+        if not adviser:
+            return jsonify(empty), 200
+        q = q.filter_by(adviser_code=adviser.adviser_code)
+    elif role == 'superadmin':
+        branch_id = request.args.get('branch_id') or claims.get('branch_id')
+        if branch_id:
+            q = q.filter_by(branch_id=int(branch_id))
+    else:
+        branch, err = _get_current_branch()
+        if err:
+            return jsonify({'success': False, 'message': err}), 400
+        q = q.filter_by(branch_id=branch.id)
     if plan_type:
         q = q.filter_by(plan_type=plan_type.upper())
     if status:

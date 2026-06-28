@@ -98,5 +98,35 @@ else
 fi
 
 echo ""
+echo "=== 6. Frontend build → /var/www/defoex ==="
+FRONTEND_DIR=""
+for d in "../defoex-frontend" "$HOME/defoex-frontend" "/home/ubuntu/defoex-frontend"; do
+  if [ -f "$d/package.json" ]; then
+    FRONTEND_DIR="$(cd "$d" && pwd)"
+    break
+  fi
+done
+
+if [ -n "$FRONTEND_DIR" ] && command -v npm >/dev/null 2>&1; then
+  echo "Building frontend in $FRONTEND_DIR"
+  cd "$FRONTEND_DIR"
+  if [ -f .env.production ]; then
+    cp .env.production .env
+  fi
+  npm ci --silent 2>/dev/null || npm install --silent
+  npm run build
+  sudo mkdir -p /var/www/defoex
+  sudo rm -rf /var/www/defoex/*
+  sudo cp -r build/* /var/www/defoex/
+  echo "Frontend deployed to /var/www/defoex"
+  cd - >/dev/null
+else
+  echo "WARN: defoex-frontend not found or npm missing — skip static deploy"
+  echo "      Clone frontend to ~/defoex-frontend and re-run this script"
+fi
+
+echo ""
 echo "✅ Deploy done. Login at http://3.110.209.154/login should work."
 echo "   Test: curl -s http://127.0.0.1/health  (must show JSON, not HTML)"
+echo "   Test: curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1/api/auth/login -H 'Content-Type: application/json' -d '{}'"
+echo "         (expect 400, NOT 404)"

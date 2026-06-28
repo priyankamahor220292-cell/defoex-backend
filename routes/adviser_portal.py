@@ -20,24 +20,31 @@ adviser_portal_bp = Blueprint('adviser_portal', __name__, url_prefix='/api/advis
 def get_current_adviser():
     """Get the adviser record for the currently logged-in adviser user."""
     claims = get_jwt()
-    if claims.get('role') != 'adviser':
+    role = (claims.get('role') or '').lower()
+    if role not in ('advisor', 'adviser'):
         return None, 'Not an adviser account'
-    # Find adviser by mobile or username from JWT
+
     identity = get_jwt_identity()
     from models.user import User
-    user = User.query.get(int(identity))
+    from utils.member_lookup import find_adviser_for_user
+
+    try:
+        user = User.query.get(int(identity))
+    except (TypeError, ValueError):
+        user = User.query.filter_by(username=str(identity).strip()).first()
     if not user:
         return None, 'User not found'
-    # Match adviser by mobile
-    adviser = Adviser.query.filter_by(mobile=user.mobile, is_active=True).first()
+
+    adviser = find_adviser_for_user(user)
     if not adviser:
-        # Try matching by username prefix (DEFA202601 → adviser created around that time)
         adviser = Adviser.query.filter_by(is_active=True).filter(
             db.or_(
-                Adviser.email == user.email,
                 Adviser.mobile == user.mobile,
+                db.func.upper(Adviser.login_username) == (user.username or '').strip().upper(),
             )
         ).first()
+    if not adviser:
+        return None, 'Adviser profile not found for this login'
     return adviser, None
 
 
