@@ -3,6 +3,46 @@
 from sqlalchemy import inspect, text
 
 
+def _column_udt_name(conn, table, column):
+    """Return PostgreSQL udt_name for a column (e.g. member_approval_status_enum)."""
+    row = conn.execute(
+        text("""
+            SELECT udt_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table
+              AND column_name = :column
+        """),
+        {'table': table, 'column': column},
+    ).fetchone()
+    return row[0] if row else None
+
+
+def ensure_member_approval_status_varchar(db):
+    """Convert members.approval_status enum → VARCHAR for SQLAlchemy String column."""
+    try:
+        with db.engine.connect() as conn:
+            udt = _column_udt_name(conn, 'members', 'approval_status')
+            if not udt or udt in ('varchar', 'character varying'):
+                return
+            conn.execute(text(
+                "ALTER TABLE members "
+                "ALTER COLUMN approval_status TYPE VARCHAR(20) "
+                "USING approval_status::text"
+            ))
+            conn.commit()
+            print("  OK   members.approval_status → VARCHAR(20)")
+            try:
+                conn.execute(text(
+                    f"DROP TYPE IF EXISTS {udt} CASCADE"
+                ))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+    except Exception as e:
+        print(f"  NOTE members.approval_status migration: {e}")
+
+
 def ensure_adviser_investor_id_column(db):
     """Add advisers.investor_id if missing (safe to run every startup)."""
     try:

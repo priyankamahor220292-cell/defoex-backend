@@ -74,11 +74,13 @@ def create_app():
             from models.notification  import Notification
 
             from utils.db_migrations import (
+                ensure_member_approval_status_varchar,
                 ensure_adviser_investor_id_column,
                 ensure_adviser_login_username_column,
                 backfill_adviser_investor_links,
                 backfill_adviser_login_usernames,
             )
+            ensure_member_approval_status_varchar(db)
             ensure_adviser_investor_id_column(db)
             ensure_adviser_login_username_column(db)
             backfill_adviser_investor_links(db)

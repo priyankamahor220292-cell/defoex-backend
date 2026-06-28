@@ -15,14 +15,12 @@ class Config:
     DATABASE_URL = os.getenv("DATABASE_URL")
 
     if DATABASE_URL:
-        if DATABASE_URL.startswith("postgres://"):
-            DATABASE_URL = DATABASE_URL.replace(
-                "postgres://",
-                "postgresql://",
-                1
-            )
-
-        SQLALCHEMY_DATABASE_URI = DATABASE_URL
+        uri = DATABASE_URL
+        if uri.startswith("postgres://"):
+            uri = "postgresql+psycopg://" + uri[len("postgres://"):]
+        elif uri.startswith("postgresql://") and "+" not in uri.split("://", 1)[0]:
+            uri = "postgresql+psycopg://" + uri[len("postgresql://"):]
+        SQLALCHEMY_DATABASE_URI = uri
 
     else:
         DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -36,7 +34,7 @@ class Config:
         )
 
         SQLALCHEMY_DATABASE_URI = (
-            f"postgresql+psycopg2://"
+            f"postgresql+psycopg://"
             f"{DB_USER}:{DB_PASSWORD}"
             f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
         )
