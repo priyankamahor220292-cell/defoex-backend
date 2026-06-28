@@ -99,6 +99,23 @@ def ensure_adviser_login_username_column(db):
         print(f"  NOTE adviser.login_username migration: {e}")
 
 
+def ensure_adviser_registration_data_column(db):
+    """Add advisers.registration_data for full registration form payload."""
+    try:
+        insp = inspect(db.engine)
+        cols = [c['name'] for c in insp.get_columns('advisers')]
+        if 'registration_data' in cols:
+            return
+        with db.engine.connect() as conn:
+            conn.execute(text(
+                "ALTER TABLE advisers ADD COLUMN registration_data TEXT"
+            ))
+            conn.commit()
+        print("  OK   Added advisers.registration_data column")
+    except Exception as e:
+        print(f"  NOTE adviser.registration_data migration: {e}")
+
+
 def backfill_adviser_login_usernames(db):
     """Set login_username on advisers from matching advisor User accounts."""
     try:

@@ -108,6 +108,8 @@ class Investment(db.Model):
         return {
             'id':                      self.id,
             'irn':                     self.irn,
+            'plan_id':                 self.irn,
+            'investment_plan_id':      self.irn,
             'investor_id':             self.investor_id,
             'branch_id':               self.branch_id,
             'plan_type':               self.plan_type,

@@ -84,7 +84,27 @@ def check_adviser():
             msg += f' Available codes: {", ".join(codes)}'
         return jsonify(error_response(msg, 404)[0]), 404
 
-    return jsonify(success_response(adviser.to_dict(), 'Adviser verified')[0]), 200
+    from utils.rank_helpers import allowed_ranks_for_promoter, rank_label
+
+    promoter_rank = int(adviser.rank_id or 1)
+    payload = adviser.to_dict()
+    payload['rank_id'] = promoter_rank
+    rank_ids, rank_err = allowed_ranks_for_promoter(promoter_rank)
+    payload['promoter_rank_id'] = promoter_rank
+    payload['promoter_rank_display'] = rank_label(promoter_rank)
+    if rank_ids:
+        max_rank = rank_ids[-1]
+        payload['max_allowed_rank_id'] = max_rank
+        payload['allowed_rank_ids'] = rank_ids
+        payload['allowed_ranks'] = [
+            {'id': r, 'label': rank_label(r)} for r in rank_ids
+        ]
+        payload['allowed_rank_id'] = max_rank
+        payload['allowed_rank_display'] = rank_label(max_rank)
+    else:
+        payload['allowed_rank_error'] = rank_err
+
+    return jsonify(success_response(payload, 'Adviser verified')[0]), 200
 
 
 @registration_bp.route('/new', methods=['POST'])
@@ -114,6 +134,9 @@ def new_registration():
     adviser = Adviser.query.filter_by(adviser_code=data['adviser_code'], is_active=True).first()
     if not adviser:
         return jsonify(error_response('Invalid Adviser Code')[0]), 400
+
+    if not branch_id and adviser.branch_id:
+        branch_id = adviser.branch_id
 
     dob = safe_date(data.get('date_of_birth'))
     age = calculate_age(dob) if dob else None
@@ -184,8 +207,22 @@ def new_registration():
             approval_status  = 'Pending',
         )
         db.session.add(member)
-        db.session.commit()
-        return jsonify(success_response(member.to_dict(), 'Registration submitted for approval')[0]), 201
+        db.session.flush()
+
+        # Auto-approve + generate DEFIN username/password on successful create
+        from utils.investor_credentials import finalize_investor_registration
+        identity = get_jwt_identity()
+        creds, finalize_err = finalize_investor_registration(member, identity)
+        if finalize_err:
+            db.session.rollback()
+            return jsonify(error_response(finalize_err)[0]), 400
+
+        resp = member.to_dict()
+        resp['credentials'] = creds
+        msg = f'Investor created — ID: {investor_id}'
+        if creds.get('password'):
+            msg += f' — Username: {creds["username"]}'
+        return jsonify(success_response(resp, msg)[0]), 201
 
     except Exception as e:
         db.session.rollback()
@@ -196,104 +233,34 @@ def new_registration():
 @registration_bp.route('/approve/<int:member_id>', methods=['POST'])
 @jwt_required()
 def approve_registration(member_id):
-    claims   = get_jwt()
-    if claims.get('role') not in ['branchmanager', 'superadmin']:
+    claims = get_jwt()
+    if claims.get('role') not in ('branchmanager', 'superadmin'):
         return jsonify(error_response('Unauthorized', 403)[0]), 403
 
     identity = get_jwt_identity()
-    data     = request.get_json() or {}
-    action   = data.get('action')
-    member   = Member.query.get_or_404(member_id)
+    data = request.get_json() or {}
+    action = data.get('action')
+    member = Member.query.get_or_404(member_id)
 
     if action == 'approve':
-        member.approval_status = 'Approved'
-        member.approved_by     = int(identity)
-        member.approved_at     = datetime.utcnow()
-
-        # Generate investor login credentials
-        import secrets
-        from models.user import User
-        inv_year = datetime.utcnow().year
-        inv_seq  = User.query.count() + 1
-        username = f"DEFIN{inv_year}{str(inv_seq).zfill(2)}"
-        password = secrets.token_hex(5)   # 10-char hex
-        while User.query.filter_by(username=username).first():
-            inv_seq += 1
-            username = f"DEFIN{inv_year}{str(inv_seq).zfill(2)}"
-        inv_user = User(
-            username  = username,
-            email     = member.email or f"{username.lower()}@defoex.com",
-            full_name = member.full_name,
-            mobile    = member.mobile,
-            role      = 'member',
-            branch_id = member.branch_id,
-            is_active = True,
-        )
-        inv_user.set_password(password)
-        try:
-            db.session.add(inv_user)
-            db.session.flush()  # test for unique constraint before commit
-        except Exception as ue:
-            db.session.rollback()
-            # Mobile already in users — still approve, just skip user creation
-            print(f"User create skip (mobile exists): {ue}")
-            creds = {'username': 'N/A (mobile exists)', 'password': 'N/A'}
-            member.approval_status = 'Approved'
-            member.approved_by     = int(identity)
-            member.approved_at     = datetime.utcnow()
-            db.session.commit()
-            return jsonify(success_response(member.to_dict(), f'Approved — mobile already has a user account')[0]), 200
-
-        # Deduct member fees (₹10 for investor) from branch wallet on approval
-        fees = float(member.member_fees or 10)
-        if member.branch_id and fees > 0:
-            from models.branch_wallet import BranchWallet, WalletTransaction
-            wallet = BranchWallet.query.filter_by(branch_id=member.branch_id).first()
-            if wallet and float(wallet.current_balance or 0) >= fees:
-                wallet.current_balance = float(wallet.current_balance or 0) - fees
-                wallet.cash_wallet     = float(wallet.cash_wallet or 0) + fees
-                try:
-                    from sqlalchemy import text
-                    db.session.execute(text("""
-                        INSERT INTO wallet_transactions
-                        (branch_id, transaction_type, amount, description,
-                         balance_after, cash_wallet_after, created_by, created_at)
-                        VALUES (:bid, :ttype, :amt, :desc, :bal, :cash, :by, NOW())
-                    """), {
-                        'bid':   member.branch_id,
-                        'ttype': 'Deduction',
-                        'amt':   fees,
-                        'desc':  f'Member registration fee — {member.full_name} ({member.investor_id})',
-                        'bal':   float(wallet.current_balance),
-                        'cash':  float(wallet.cash_wallet),
-                        'by':    int(identity),
-                    })
-                except Exception as e:
-                    print(f"Wallet txn error (non-critical): {e}")
-
-        msg = f'Registration approved for {member.full_name} — ₹{fees:.0f} deducted from branch wallet'
-        creds = {'username': username, 'password': password}
-
-        # Link adviser profile when same person has different codes (DFX vs DEFAD)
-        from models.adviser import Adviser
-        adviser = Adviser.query.filter_by(mobile=member.mobile).first()
-        if not adviser and member.email:
-            adviser = Adviser.query.filter(
-                db.func.lower(Adviser.email) == member.email.strip().lower()
-            ).first()
-        if adviser and not getattr(adviser, 'investor_id', None):
-            adviser.investor_id = member.investor_id
+        from utils.investor_credentials import finalize_investor_registration
+        creds, err = finalize_investor_registration(member, identity)
+        if err:
+            return jsonify(error_response(err)[0]), 400
+        msg = f'Registration approved for {member.full_name}'
+        if creds.get('password'):
+            msg += f' — Username: {creds["username"]}'
     elif action == 'reject':
         member.approval_status = 'Rejected'
+        db.session.commit()
         msg = f'Registration rejected for {member.full_name}'
+        creds = None
     else:
         return jsonify(error_response('Invalid action. Use approve or reject')[0]), 400
 
-    db.session.commit()
     resp = member.to_dict()
-    if action == 'approve' and 'creds' in dir():
+    if creds:
         resp['credentials'] = creds
-        resp['credentials']['message'] = f'Congratulations Investor Created! Username: {creds["username"]} Password: {creds["password"]}'
     return jsonify(success_response(resp, msg)[0]), 200
 
 

@@ -33,6 +33,7 @@ from utils.member_lookup import (
     find_adviser_identity,
     find_member_for_adviser,
 )
+from utils.branch_wallet_ops import deduct_branch_wallet
 
 investment_plan_bp = Blueprint('investment_plan', __name__, url_prefix='/api/investment-plans')
 
@@ -132,6 +133,21 @@ def _investor_id_for_user(user):
         if member:
             return member.investor_id
     return None
+
+
+def _deduct_investment_payment(investment, amount, created_by=None, note=''):
+    """Deduct plan payment from branch limit → add to cash wallet."""
+    desc = (
+        f'{investment.plan_type} plan — {investment.investor_id} '
+        f'({investment.irn}){note}'
+    )
+    return deduct_branch_wallet(
+        investment.branch_id,
+        amount,
+        desc,
+        reference_id=f'INVEST-{investment.id}',
+        created_by=created_by,
+    )
 
 
 def _get_current_branch(member=None):
@@ -347,13 +363,27 @@ def create_mis_plan():
             status             = 'Pending',
         )
         db.session.add(inst)
+
+        identity = get_jwt_identity()
+        wallet_result, wallet_err = _deduct_investment_payment(
+            investment, float(amount), created_by=identity, note=' — 1st installment'
+        )
+        if wallet_err:
+            db.session.rollback()
+            return jsonify({'success': False, 'message': wallet_err}), 400
+
         db.session.commit()
 
         return jsonify({
             'success': True,
-            'message': f'MIS Plan created successfully for {member.full_name}. Pending approval.',
+            'message': (
+                f'MIS Plan created for {member.full_name}. '
+                f'₹{float(amount):,.0f} deducted from branch limit → cash wallet.'
+            ),
             'data': {
                 'investment_id':         investment.id,
+                'irn':                   investment.irn,
+                'plan_id':               investment.irn,
                 'plan_name':             investment.plan_name,
                 'monthly_amount':        float(amount),
                 'total_installments':    months,
@@ -362,6 +392,7 @@ def create_mis_plan():
                 'investment_date':       investment_date.isoformat(),
                 'maturity_date':         maturity_date.isoformat(),
                 'payment_mode':          payment_mode,
+                'wallet':                wallet_result,
             }
         }), 201
 
@@ -454,19 +485,34 @@ def create_sis_plan():
             status             = 'Pending',
         )
         db.session.add(inst)
+
+        identity = get_jwt_identity()
+        wallet_result, wallet_err = _deduct_investment_payment(
+            investment, float(amount), created_by=identity, note=' — lump sum'
+        )
+        if wallet_err:
+            db.session.rollback()
+            return jsonify({'success': False, 'message': wallet_err}), 400
+
         db.session.commit()
 
         return jsonify({
             'success': True,
-            'message': f'SIS Plan created for {member.full_name}. Pending approval.',
+            'message': (
+                f'SIS Plan created for {member.full_name}. '
+                f'₹{float(amount):,.0f} deducted from branch limit → cash wallet.'
+            ),
             'data': {
                 'investment_id':   investment.id,
+                'irn':             investment.irn,
+                'plan_id':         investment.irn,
                 'plan_name':       investment.plan_name,
                 'lump_amount':     float(amount),
                 'maturity_amount': float(maturity),
                 'investment_date': investment_date.isoformat(),
                 'maturity_date':   maturity_date.isoformat(),
                 'payment_mode':    payment_mode,
+                'wallet':          wallet_result,
             }
         }), 201
 
@@ -558,16 +604,32 @@ def mis_contribution():
 
         investment.installments_paid = next_inst_no
 
+        identity = get_jwt_identity()
+        wallet_result, wallet_err = deduct_branch_wallet(
+            investment.branch_id,
+            float(amount),
+            f'MIS installment #{next_inst_no} — {investment.investor_id} ({investment.irn})',
+            reference_id=f'INSTALL-{investment_id}-{next_inst_no}',
+            created_by=identity,
+        )
+        if wallet_err:
+            db.session.rollback()
+            return jsonify({'success': False, 'message': wallet_err}), 400
+
         db.session.commit()
 
         return jsonify({
             'success': True,
-            'message': f'Installment #{next_inst_no} recorded successfully',
+            'message': (
+                f'Installment #{next_inst_no} recorded. '
+                f'₹{float(amount):,.0f} deducted from branch limit → cash wallet.'
+            ),
             'data': {
                 'installment_no':   next_inst_no,
                 'total_paid':       next_inst_no,
                 'remaining':        investment.total_installments - next_inst_no,
                 'payment_mode':     payment_mode,
+                'wallet':           wallet_result,
             }
         }), 201
 
@@ -578,18 +640,19 @@ def mis_contribution():
 
 # ─── APPROVE / REJECT INVESTMENT ─────────────────────────────────────────────
 
+@investment_plan_bp.route('/approve/<int:investment_id>', methods=['POST'])
 @investment_plan_bp.route('/approve-investment/<int:investment_id>', methods=['POST'])
 @jwt_required()
 def approve_investment(investment_id):
     """
     Approve or reject a pending investment plan.
 
-    JSON body:
-      action  : str  ('approve' or 'reject')
-      remarks : str  (optional)
+    On approve: deduct plan amount from branch limit → cash wallet (if not already
+    deducted at create time), then mark approved.
     """
     data = request.get_json(force=True) or {}
     action = (data.get('action') or '').strip().lower()
+    identity = get_jwt_identity()
 
     if action not in ('approve', 'reject'):
         return jsonify({'success': False, 'message': 'action must be "approve" or "reject"'}), 400
@@ -603,16 +666,31 @@ def approve_investment(investment_id):
                         'message': f'Investment is already {investment.approval_status}'}), 400
 
     try:
+        wallet_result = None
         if action == 'approve':
+            deduct_amount = float(investment.monthly_amount or 0)
+            wallet_result, wallet_err = _deduct_investment_payment(
+                investment, deduct_amount, created_by=identity, note=' — approval'
+            )
+            if wallet_err:
+                db.session.rollback()
+                return jsonify({'success': False, 'message': wallet_err}), 400
+
             investment.approval_status = 'Approved'
             investment.approved_at = datetime.utcnow()
-            msg = 'Investment plan approved successfully'
+            msg = (
+                f'Investment plan approved. '
+                f'₹{deduct_amount:,.0f} deducted from branch limit → cash wallet.'
+            )
         else:
             investment.approval_status = 'Rejected'
             msg = 'Investment plan rejected'
 
         db.session.commit()
-        return jsonify({'success': True, 'message': msg}), 200
+        resp = {'success': True, 'message': msg}
+        if wallet_result:
+            resp['wallet'] = wallet_result
+        return jsonify(resp), 200
 
     except Exception as e:
         db.session.rollback()

@@ -1,5 +1,6 @@
 from extensions import db
 from datetime import datetime
+import json
 
 RANKS = {
     1: 'SR',   # Senior Representative
@@ -40,6 +41,7 @@ class Adviser(db.Model):
     is_company_owner = db.Column(db.Boolean, default=False)
     is_blacklisted   = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
+    registration_data = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     branch = db.relationship('Branch', backref='advisers', lazy=True)
@@ -48,19 +50,43 @@ class Adviser(db.Model):
     def rank_name(self):
         return RANKS.get(self.rank_id, 'SR')
 
-    def to_dict(self):
+    def _registration_dict(self):
+        raw = getattr(self, 'registration_data', None)
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            return {}
+
+    def to_dict(self, investor_count=0):
         rank_name = RANKS.get(self.rank_id, 'SR')
+        reg = self._registration_dict()
         # Get parent adviser name
         parent_name = None
         if self.parent_adviser_code:
             try:
-                from extensions import db
                 p = db.session.query(Adviser).filter_by(
                     adviser_code=self.parent_adviser_code).first()
                 if p:
                     parent_name = p.full_name
             except Exception:
                 pass
+
+        if getattr(self, 'is_blacklisted', False):
+            status = 'Blacklisted'
+        elif not self.is_active:
+            status = 'Pending'
+        elif investor_count >= 1:
+            status = 'Active'
+        else:
+            status = 'Not Active'
+
+        father = getattr(self, 'father_name', None) or reg.get('father_spouse_name')
+        doj = reg.get('registration_date') or reg.get('date_of_joining')
+        if not doj and self.created_at:
+            doj = self.created_at.date().isoformat()
+
         return {
             'id': self.id,
             'adviser_code': self.adviser_code,
@@ -68,15 +94,23 @@ class Adviser(db.Model):
             'mobile': self.mobile,
             'email': self.email,
             'rank_id': self.rank_id,
-            'rank_name': self.rank_name,
+            'rank_name': rank_name,
+            'rank_display': f'{self.rank_id}. {rank_name}',
             'branch_id': self.branch_id,
             'parent_adviser_code': self.parent_adviser_code,
+            'promoter_adviser_id': self.parent_adviser_code,
             'login_username': getattr(self, 'login_username', None),
             'investor_id': getattr(self, 'investor_id', None),
             'is_company_owner':   self.is_company_owner,
             'is_blacklisted':     getattr(self, 'is_blacklisted', False),
-            'father_name':        getattr(self, 'father_name', None),
+            'father_name':        father,
+            'father_spouse_name': father,
             'parent_adviser_name': parent_name,
+            'promoter_adviser_name': parent_name,
             'is_active': self.is_active,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'status': status,
+            'investor_count': investor_count,
+            'date_of_joining': doj,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'registration': reg,
         }
