@@ -140,15 +140,26 @@ def _get_current_branch(member=None):
 
 # ─── GET INVESTOR / ADVISER DETAILS ──────────────────────────────────────────
 
+@investment_plan_bp.route('/get-investor-details', methods=['GET'])
 @investment_plan_bp.route('/get-investor-details/<member_id>', methods=['GET'])
 @jwt_required()
-def get_investor_details(member_id):
+def get_investor_details(member_id=None):
     """
     Fetch member info for the MIS / SIS plan creation form.
     Accepts investor_id, adviser_code, or DEFAD login ID.
     Returns adviser-only profile when investor registration is still pending.
+
+    Use ?member_id=DEFAD202608 so DEFAD IDs are not in the URL path (some
+    browsers/ad blockers strip Authorization when the path contains "AD").
     """
-    code = (member_id or '').strip().upper()
+    code = (
+        member_id
+        or request.args.get('member_id')
+        or request.args.get('code')
+        or ''
+    ).strip().upper()
+    if not code:
+        return jsonify({'success': False, 'message': 'member_id is required'}), 400
     member, err = _get_member_by_any_id(code)
 
     if member:

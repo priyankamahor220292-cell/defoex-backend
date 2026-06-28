@@ -102,4 +102,16 @@ app = create_app()
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host="0.0.0.0", port=5001)
+    import os
+    import sys
+
+    # use_reloader spawns a child process; a second Ctrl+C during shutdown can
+    # print a scary KeyboardInterrupt traceback on Python 3.14+. Set FLASK_RELOAD=0
+    # to disable auto-reload, or press Ctrl+C once and wait for a clean exit.
+    use_reloader = os.environ.get('FLASK_RELOAD', '1') == '1'
+
+    try:
+        app.run(debug=True, host='0.0.0.0', port=5001, use_reloader=use_reloader)
+    except KeyboardInterrupt:
+        print('\nDefOex backend stopped.')
+        sys.exit(0)
