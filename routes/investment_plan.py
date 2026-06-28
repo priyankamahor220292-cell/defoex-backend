@@ -124,7 +124,7 @@ def get_investor_details(member_id):
     """
     member, err = _get_member_by_any_id(member_id)
     if err:
-        return jsonify({'success': False, 'message': err}), 404
+        return jsonify({'success': False, 'message': err}), 400
 
     # Try to get adviser name
     adviser_name = None

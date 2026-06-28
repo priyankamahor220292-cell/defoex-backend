@@ -16,6 +16,12 @@ def _approved_members():
     return Member.query.filter(Member.approval_status == 'Approved')
 
 
+def _looks_like_mobile(code):
+    """True only for 10-digit Indian mobile numbers."""
+    digits = normalize_mobile(code)
+    return len(digits) == 10 and digits[0] in '6789'
+
+
 def find_member_for_adviser(adviser):
     """
     Find the approved investor record for an adviser.
@@ -81,6 +87,18 @@ def find_member_for_adviser(adviser):
         ).all()
         if len(matches) == 1:
             return matches[0]
+        if len(matches) > 1:
+            if adviser.branch_id:
+                branch_matches = [m for m in matches if m.branch_id == adviser.branch_id]
+                if len(branch_matches) == 1:
+                    return branch_matches[0]
+                if branch_matches:
+                    matches = branch_matches
+            matches.sort(
+                key=lambda m: m.created_at or __import__('datetime').datetime.min,
+                reverse=True,
+            )
+            return matches[0]
 
     return None
 
@@ -139,7 +157,7 @@ def resolve_member_from_code(raw_code):
     member = Member.query.filter(
         db.func.upper(Member.investor_id) == code
     ).first()
-    if not member:
+    if not member and _looks_like_mobile(code):
         member = find_member_by_mobile(code)
     if member:
         return _ensure_approved(member, code)
@@ -164,11 +182,21 @@ def resolve_member_from_code(raw_code):
     if adviser:
         member = find_member_for_adviser(adviser)
         if member:
-            link_adviser_investor(adviser)
+            try:
+                link_adviser_investor(adviser, commit=True)
+            except Exception:
+                db.session.rollback()
             return _ensure_approved(member, code)
+        hint = ''
+        same_name = _approved_members().filter(
+            db.func.lower(Member.full_name) == adviser.full_name.strip().lower()
+        ).all() if adviser.full_name else []
+        if same_name:
+            ids = ', '.join(m.investor_id for m in same_name[:3])
+            hint = f' Try investor ID: {ids}.'
         return None, (
             f'"{code}" is adviser {adviser.full_name}, but no approved investor '
-            f'profile is linked yet. Register them as an investor first.'
+            f'profile is linked yet.{hint} Register them as an investor first.'
         )
 
     return None, f'No investor or adviser found for "{code}"'
