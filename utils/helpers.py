@@ -128,8 +128,8 @@ def branch_manager_display_name(name):
         return name
     text = str(name).strip()
     if text.lower().startswith('hello '):
-        return text
-    return f'hello {text}'
+        return text if text.startswith('Hello ') else f'Hello {text[6:]}'
+    return f'Hello {text}'
 
 
 # ── Response helpers ──────────────────────────────────────────────────────────
