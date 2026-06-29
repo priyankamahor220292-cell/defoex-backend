@@ -4,7 +4,8 @@ utils/helpers.py — DefOex IntraTech
 ID Formats:
   Investor ID     : DEFIN202601   (DEFIN + year + 2-digit seq)
   Adviser ID      : DEFAD202601   (DEFAD + year + 2-digit seq)
-  Investment Plan : INV20260001   (INV   + year + 4-digit seq)
+  Investment Plan : 9-MISINV202601  (branch_id-MISINV + year + 2-digit seq)
+                     9-SISINV202601  (branch_id-SISINV + year + 2-digit seq)
 """
 
 from datetime import date, datetime
@@ -40,18 +41,46 @@ def generate_adviser_code():
     return candidate
 
 
-# ── Investment Plan No: INV20260001 ──────────────────────────────────────────
-def generate_irn():
+# ── Investment Plan ID: 9-MISINV202601 / 9-SISINV202601 ───────────────────────
+def generate_investment_plan_id(branch_id, plan_type):
+    """
+    Generate branch-scoped investment plan ID.
+    MIS → {branch_id}-MISINV{year}{seq}  e.g. 9-MISINV202601
+    SIS → {branch_id}-SISINV{year}{seq}  e.g. 9-SISINV202601
+    """
     from models.investment import Investment
-    year   = datetime.now().year
-    prefix = f'INV{year}'
+
+    plan = (plan_type or 'MIS').strip().upper()
+    if plan not in ('MIS', 'SIS'):
+        plan = 'MIS'
+
+    year = datetime.now().year
+    branch = int(branch_id) if branch_id is not None else 0
+    prefix = f'{branch}-{plan}INV{year}'
+
     existing = Investment.query.filter(Investment.irn.like(f'{prefix}%')).count()
     seq = existing + 1
-    candidate = f'{prefix}{str(seq).zfill(4)}'
+    candidate = f'{prefix}{str(seq).zfill(2)}'
     while Investment.query.filter_by(irn=candidate).first():
         seq += 1
-        candidate = f'{prefix}{str(seq).zfill(4)}'
+        candidate = f'{prefix}{str(seq).zfill(2)}'
     return candidate
+
+
+def generate_irn(branch_id=None, plan_type='MIS'):
+    """Backward-compatible alias — prefer generate_investment_plan_id."""
+    if branch_id is None:
+        from models.investment import Investment
+        year = datetime.now().year
+        prefix = f'INV{year}'
+        existing = Investment.query.filter(Investment.irn.like(f'{prefix}%')).count()
+        seq = existing + 1
+        candidate = f'{prefix}{str(seq).zfill(4)}'
+        while Investment.query.filter_by(irn=candidate).first():
+            seq += 1
+            candidate = f'{prefix}{str(seq).zfill(4)}'
+        return candidate
+    return generate_investment_plan_id(branch_id, plan_type)
 
 
 # ── Age from DOB ──────────────────────────────────────────────────────────────
@@ -91,6 +120,16 @@ def calculate_age(dob):
     if (today.month, today.day) < (dob.month, dob.day):
         age -= 1
     return age if age >= 0 else None
+
+
+def branch_manager_display_name(name):
+    """Display prefix for branch manager names (not stored in DB)."""
+    if not name:
+        return name
+    text = str(name).strip()
+    if text.lower().startswith('hello '):
+        return text
+    return f'hello {text}'
 
 
 # ── Response helpers ──────────────────────────────────────────────────────────

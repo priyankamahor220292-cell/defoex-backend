@@ -9,12 +9,13 @@ from utils.helpers import (
     normalize_mobile, find_adviser_by_mobile, find_member_by_mobile,
 )
 from utils.rank_helpers import validate_assigned_rank, allowed_ranks_for_promoter, rank_label
+from utils.member_lookup import find_promoter_adviser
 import json
 import traceback
 
 advisers_bp = Blueprint('advisers', __name__, url_prefix='/api/advisers')
 
-ADVISER_FEE = 500  # flowchart: adviser create fee ₹500
+ADVISER_FEE = 650  # Fixed adviser registration fee
 
 
 def _investor_counts():
@@ -86,13 +87,49 @@ def adviser_detail(adviser_id):
     return jsonify(success_response(payload)[0]), 200
 
 
+def _promoter_verify_payload(adviser):
+    """Build verify response with rank options for downline registration."""
+    promoter_rank = int(adviser.rank_id or 1)
+    payload = _adviser_payload(adviser)
+    payload['rank_id'] = promoter_rank
+    rank_ids, rank_err = allowed_ranks_for_promoter(promoter_rank)
+    payload['promoter_rank_id'] = promoter_rank
+    payload['promoter_rank_display'] = rank_label(promoter_rank)
+    if rank_ids:
+        max_rank = rank_ids[-1]
+        payload['max_allowed_rank_id'] = max_rank
+        payload['allowed_rank_ids'] = rank_ids
+        payload['allowed_ranks'] = [{'id': r, 'label': rank_label(r)} for r in rank_ids]
+        payload['allowed_rank_id'] = max_rank
+        payload['allowed_rank_display'] = rank_label(max_rank)
+    else:
+        payload['allowed_rank_error'] = rank_err
+    return payload
+
+
+@advisers_bp.route('/verify-promoter', methods=['POST'])
+@jwt_required()
+def verify_promoter_adviser():
+    """Verify promoter adviser ID and return assignable downline ranks."""
+    data = request.get_json() or {}
+    code = (data.get('adviser_code') or data.get('promoter_adviser_id') or '').strip()
+    if not code:
+        return jsonify(error_response('Please enter a Promoter Adviser ID')[0]), 400
+
+    adviser, err = find_promoter_adviser(code)
+    if err:
+        return jsonify(error_response(err, 404)[0]), 404
+
+    return jsonify(success_response(_promoter_verify_payload(adviser), 'Adviser verified')[0]), 200
+
+
 @advisers_bp.route('/<code>', methods=['GET'])
 @jwt_required()
 def get_adviser(code):
-    a = Adviser.query.filter_by(adviser_code=code).first()
-    if not a:
-        return jsonify(error_response('Adviser not found', 404)[0]), 404
-    return jsonify(success_response(_adviser_payload(a))[0]), 200
+    adviser, err = find_promoter_adviser(code)
+    if err:
+        return jsonify(error_response(err, 404)[0]), 404
+    return jsonify(success_response(_adviser_payload(adviser))[0]), 200
 
 
 @advisers_bp.route('/', methods=['POST'])
@@ -135,9 +172,10 @@ def create_adviser():
     if not parent_code:
         return jsonify(error_response('Promoter Adviser ID is required')[0]), 400
 
-    promoter = Adviser.query.filter_by(adviser_code=parent_code, is_active=True).first()
-    if not promoter:
-        return jsonify(error_response('Promoter adviser not found or not active')[0]), 400
+    promoter, promoter_err = find_promoter_adviser(parent_code)
+    if promoter_err:
+        return jsonify(error_response(promoter_err)[0]), 400
+    parent_code = promoter.adviser_code
 
     rank_err = validate_assigned_rank(promoter.rank_id, rank_id)
     if rank_err:
@@ -412,9 +450,9 @@ def advisers_by_promoter(promoter_code):
 @jwt_required()
 def allowed_rank_for_promoter_route(promoter_code):
     """Return assignable ranks when registering under this promoter (rank N → ranks 1..N-1)."""
-    promoter = Adviser.query.filter_by(adviser_code=promoter_code, is_active=True).first()
-    if not promoter:
-        return jsonify(error_response('Promoter not found', 404)[0]), 404
+    promoter, err = find_promoter_adviser(promoter_code)
+    if err:
+        return jsonify(error_response(err, 404)[0]), 404
 
     rank_ids, err = allowed_ranks_for_promoter(promoter.rank_id)
     if err:

@@ -286,6 +286,83 @@ def find_adviser_identity(raw_code):
     return adviser, user
 
 
+def _adviser_by_mobile(mobile):
+    """Find active adviser matching a mobile number."""
+    if not mobile:
+        return None
+    norm = normalize_mobile(mobile)
+    if len(norm) != 10:
+        return None
+    for candidate in Adviser.query.filter(
+        Adviser.is_active == True,
+        Adviser.mobile.isnot(None),
+    ).all():
+        if normalize_mobile(candidate.mobile) == norm:
+            return candidate
+    return None
+
+
+def find_promoter_adviser(raw_code):
+    """
+    Resolve promoter adviser for downline registration.
+    Accepts adviser code (DFX/DEFAD), login username, or linked investor ID (DEFIN).
+    Returns (adviser, error_message).
+    """
+    if not raw_code or not str(raw_code).strip():
+        return None, 'Please enter a Promoter Adviser ID'
+
+    code = str(raw_code).strip().upper()
+
+    if 'DFX-IRN-' in code:
+        return None, (
+            'That is an Investment Bond number, not an adviser code. '
+            'Use an Adviser ID such as DFX-2026-000006 or DEFAD login.'
+        )
+
+    adviser, _user = find_adviser_identity(code)
+    if not adviser and not code.startswith('DFX-ADV-') and code.startswith('DFX-'):
+        adviser, _user = find_adviser_identity('DFX-ADV-' + code.replace('DFX-', '', 1))
+
+    if not adviser:
+        adviser = Adviser.query.filter(
+            db.func.upper(Adviser.investor_id) == code,
+        ).first()
+
+    if not adviser and code.startswith('DEFIN'):
+        member = Member.query.filter(
+            db.func.upper(Member.investor_id) == code,
+        ).first()
+        if member:
+            adviser = _adviser_by_mobile(member.mobile)
+            if not adviser:
+                return None, (
+                    f'"{code}" is an Investor ID ({member.full_name or "investor"}), '
+                    f'not an Adviser ID. Enter the promoter\'s Adviser code '
+                    f'(e.g. DFX-2026-000006 or DEFAD login username).'
+                )
+
+    if not adviser:
+        hints = defad_id_suggestions()
+        msg = f'Promoter Adviser ID "{code}" not found.'
+        sample = Adviser.query.filter_by(is_active=True).order_by(Adviser.id.desc()).limit(5).all()
+        if sample:
+            msg += ' Active adviser codes: ' + ', '.join(a.adviser_code for a in sample) + '.'
+        elif hints:
+            msg += f' Available DEFAD IDs: {", ".join(hints)}.'
+        return None, msg
+
+    if getattr(adviser, 'is_blacklisted', False):
+        return None, f'Adviser {adviser.full_name} ({adviser.adviser_code}) is blacklisted.'
+
+    if not adviser.is_active:
+        return None, (
+            f'Adviser {adviser.full_name} ({adviser.adviser_code}) is pending approval. '
+            f'Approve the adviser first before registering downline.'
+        )
+
+    return adviser, None
+
+
 def defad_id_suggestions(limit=5):
     """Recent DEFAD login / adviser IDs in this database (for error hints)."""
     codes = set()

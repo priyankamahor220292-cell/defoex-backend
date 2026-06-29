@@ -5,15 +5,16 @@ from models.member import Member
 from models.branch_wallet import BranchWallet
 from extensions import db
 from utils.helpers import success_response, error_response
+from utils.role_scoping import scope_members, scope_investments, current_adviser, current_role
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import func
+from sqlalchemy import func, false
 import traceback
 
 reports_v4_bp = Blueprint('reports_v4', __name__, url_prefix='/api/reports')
 
 
-def _business_total(branch_id, start_date, end_date):
+def _business_total(branch_id, start_date, end_date, adviser_code=None):
     try:
         q = db.session.query(func.sum(Investment.monthly_amount)).filter(
             Investment.approval_status == 'Approved',
@@ -22,12 +23,14 @@ def _business_total(branch_id, start_date, end_date):
         )
         if branch_id:
             q = q.filter(Investment.branch_id == branch_id)
+        if adviser_code:
+            q = q.filter(Investment.adviser_code == adviser_code)
         return float(q.scalar() or 0)
     except Exception:
         return 0
 
 
-def _investment_count(branch_id, start_date, end_date):
+def _investment_count(branch_id, start_date, end_date, adviser_code=None):
     try:
         q = Investment.query.filter(
             Investment.approval_status == 'Approved',
@@ -36,6 +39,8 @@ def _investment_count(branch_id, start_date, end_date):
         )
         if branch_id:
             q = q.filter(Investment.branch_id == branch_id)
+        if adviser_code:
+            q = q.filter(Investment.adviser_code == adviser_code)
         return q.count()
     except Exception:
         return 0
@@ -56,11 +61,11 @@ def dashboard_stats():
         # Base queries
         q_members     = Member.query.filter_by(approval_status='Approved')
         q_investments = Investment.query.filter_by(approval_status='Approved')
+        q_members     = scope_members(q_members)
+        q_investments = scope_investments(q_investments)
 
-        # Filter by branch for BM
+        # Filter by branch for BM (scope_* already applied branch for BM)
         if role == 'branchmanager' and branch_id:
-            q_members     = q_members.filter_by(branch_id=branch_id)
-            q_investments = q_investments.filter_by(branch_id=branch_id)
             # Exclude company owner adviser from BM view
             from models.adviser import Adviser as AdvModel
             q_advisers_bm = AdvModel.query.filter_by(
@@ -75,20 +80,30 @@ def dashboard_stats():
             Investment.approval_status == 'Approved',
             Investment.investment_date >= this_month_start
         )
-        if role == 'branchmanager' and branch_id:
+        role_l = (role or '').lower()
+        if role_l == 'branchmanager' and branch_id:
             monthly_q = monthly_q.filter(Investment.branch_id == branch_id)
+        elif role_l in ('advisor', 'adviser'):
+            adviser = current_adviser()
+            if adviser:
+                monthly_q = monthly_q.filter(Investment.adviser_code == adviser.adviser_code)
+            else:
+                monthly_q = monthly_q.filter(false())
+
         monthly_business = float(monthly_q.scalar() or 0)
 
-        # Pending counts
+        # Pending counts — advisers do not manage approvals
         pending_q_members = Member.query.filter_by(approval_status='Pending')
         pending_q_inv     = Investment.query.filter_by(approval_status='Pending')
-        if role == 'branchmanager' and branch_id:
-            pending_q_members = pending_q_members.filter_by(branch_id=branch_id)
-            pending_q_inv     = pending_q_inv.filter_by(branch_id=branch_id)
-            # BM never sees company owner related data
-
-        pending_members     = pending_q_members.count()
-        pending_investments = pending_q_inv.count()
+        if role_l in ('advisor', 'adviser'):
+            pending_members = 0
+            pending_investments = 0
+        else:
+            if role_l == 'branchmanager' and branch_id:
+                pending_q_members = pending_q_members.filter_by(branch_id=branch_id)
+                pending_q_inv     = pending_q_inv.filter_by(branch_id=branch_id)
+            pending_members     = pending_q_members.count()
+            pending_investments = pending_q_inv.count()
 
         return jsonify(success_response({
             'total_members':       total_members,
@@ -109,8 +124,14 @@ def business_summary():
     """Business totals for 1M, 3M, 6M, 1Y, Overall"""
     try:
         claims    = get_jwt()
-        branch_id = claims.get('branch_id') if claims.get('role') == 'branchmanager' \
+        role_l    = current_role()
+        branch_id = claims.get('branch_id') if role_l == 'branchmanager' \
                     else request.args.get('branch_id', type=int)
+        adviser_code = None
+        if role_l in ('advisor', 'adviser'):
+            adviser = current_adviser()
+            adviser_code = adviser.adviser_code if adviser else None
+            branch_id = None
 
         today = date.today()
         periods = {
@@ -124,8 +145,8 @@ def business_summary():
         summary = {}
         for label, (start, end) in periods.items():
             summary[label] = {
-                'total_business':   _business_total(branch_id, start, end),
-                'investment_count': _investment_count(branch_id, start, end),
+                'total_business':   _business_total(branch_id, start, end, adviser_code),
+                'investment_count': _investment_count(branch_id, start, end, adviser_code),
                 'from': start.isoformat(),
                 'to':   end.isoformat(),
             }
@@ -149,8 +170,7 @@ def list_investors():
     """List investors with date range filter"""
     try:
         claims    = get_jwt()
-        branch_id = claims.get('branch_id') if claims.get('role') == 'branchmanager' \
-                    else request.args.get('branch_id', type=int)
+        role_l    = current_role()
 
         date_from = request.args.get('date_from')
         date_to   = request.args.get('date_to')
@@ -158,8 +178,7 @@ def list_investors():
         per_page  = request.args.get('per_page', 20, type=int)
 
         query = Member.query.filter_by(approval_status='Approved')
-        if branch_id:
-            query = query.filter_by(branch_id=branch_id)
+        query = scope_members(query)
         if date_from:
             try:
                 query = query.filter(Member.date_of_joining >= date.fromisoformat(date_from))
@@ -209,7 +228,9 @@ def global_search():
     """
     try:
         claims    = get_jwt()
-        branch_id = claims.get('branch_id') if claims.get('role') == 'branchmanager' else None
+        role_l    = current_role()
+        branch_id = claims.get('branch_id') if role_l == 'branchmanager' else None
+        adviser   = current_adviser() if role_l in ('advisor', 'adviser') else None
         query     = request.args.get('q', '').strip()
         search_by = request.args.get('by', 'all')   # irn | investor | adviser | mobile | all
 
@@ -222,6 +243,7 @@ def global_search():
         # ── Search Investments by IRN ─────────────────────────────
         if search_by in ('irn', 'all'):
             inv_q = Investment.query.filter(Investment.irn.ilike(q_like))
+            inv_q = scope_investments(inv_q)
             if branch_id:
                 inv_q = inv_q.filter_by(branch_id=branch_id)
             for inv in inv_q.limit(10).all():
@@ -242,6 +264,7 @@ def global_search():
                     Member.aadhar_number.ilike(q_like),
                 )
             )
+            mem_q = scope_members(mem_q)
             if branch_id:
                 mem_q = mem_q.filter_by(branch_id=branch_id)
             for m in mem_q.limit(10).all():
@@ -262,9 +285,11 @@ def global_search():
                     Adviser.full_name.ilike(q_like),
                     Adviser.mobile.ilike(q_like),
                 ),
-                Adviser.is_company_owner == False  # Never show company owner
+                Adviser.is_company_owner == False
             )
-            if branch_id:
+            if adviser:
+                adv_q = adv_q.filter_by(adviser_code=adviser.adviser_code)
+            elif branch_id:
                 adv_q = adv_q.filter_by(branch_id=branch_id)
             results['advisers'] = [a.to_dict() for a in adv_q.limit(10).all()]
 

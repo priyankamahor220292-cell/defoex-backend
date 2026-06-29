@@ -77,3 +77,58 @@ def deduct_branch_wallet(branch_id, amount, description, reference_id=None, crea
         'current_balance': float(wallet.current_balance),
         'cash_wallet': float(wallet.cash_wallet),
     }, None
+
+
+def refund_branch_wallet(branch_id, amount, description, reference_id=None, created_by=None):
+    """
+    Reverse a prior deduction: current_balance ↑, cash_wallet ↓.
+    Used when a pending investment plan is rejected after payment was collected.
+    """
+    amount = float(amount or 0)
+    if amount <= 0:
+        wallet = BranchWallet.query.filter_by(branch_id=int(branch_id)).first()
+        return {
+            'amount': 0,
+            'skipped': True,
+            'current_balance': float(wallet.current_balance or 0) if wallet else 0,
+            'cash_wallet': float(wallet.cash_wallet or 0) if wallet else 0,
+        }, None
+
+    ref = str(reference_id) if reference_id else None
+    if ref and not wallet_reference_exists(ref):
+        wallet = ensure_branch_wallet(branch_id)
+        return {
+            'amount': amount,
+            'skipped': True,
+            'nothing_to_refund': True,
+            'current_balance': float(wallet.current_balance or 0),
+            'cash_wallet': float(wallet.cash_wallet or 0),
+        }, None
+
+    wallet = ensure_branch_wallet(branch_id)
+    cash = float(wallet.cash_wallet or 0)
+    if cash < amount:
+        return None, (
+            f'Cannot refund ₹{amount:,.0f}: cash wallet has only ₹{cash:,.0f}'
+        )
+
+    wallet.current_balance = float(wallet.current_balance or 0) + amount
+    wallet.cash_wallet = cash - amount
+
+    txn = WalletTransaction(
+        branch_id=int(branch_id),
+        transaction_type='Refund',
+        amount=amount,
+        description=description,
+        reference_id=f'{ref}-REFUND' if ref else None,
+        balance_after=wallet.current_balance,
+        cash_wallet_after=wallet.cash_wallet,
+        created_by=int(created_by) if created_by else None,
+    )
+    db.session.add(txn)
+
+    return {
+        'amount': amount,
+        'current_balance': float(wallet.current_balance),
+        'cash_wallet': float(wallet.cash_wallet),
+    }, None

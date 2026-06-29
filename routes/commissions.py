@@ -4,6 +4,7 @@ from models.commission import Commission
 from models.adviser import Adviser
 from extensions import db
 from utils.helpers import success_response, error_response
+from utils.role_scoping import scope_commissions, current_adviser, current_role
 
 commissions_bp = Blueprint('commissions', __name__, url_prefix='/api/commissions')
 
@@ -19,27 +20,7 @@ def list_commissions():
     status       = request.args.get('status')
 
     query = Commission.query
-
-    # Branch Manager — only see commissions for advisers in their branch
-    # AND exclude company owner adviser commissions
-    if role == 'branchmanager':
-        # Get adviser codes for this branch (excluding company owner)
-        branch_advisers = Adviser.query.filter_by(
-            branch_id=branch_id,
-            is_active=True,
-            is_company_owner=False
-        ).with_entities(Adviser.adviser_code).all()
-        branch_codes = [a.adviser_code for a in branch_advisers]
-        if branch_codes:
-            query = query.filter(Commission.adviser_code.in_(branch_codes))
-        else:
-            # No advisers in branch — return empty
-            return jsonify(success_response({'items': [], 'total': 0, 'pages': 1})[0]), 200
-    else:
-        # Superadmin — exclude company owner commissions from display
-        owner = Adviser.query.filter_by(is_company_owner=True).first()
-        if owner:
-            query = query.filter(Commission.adviser_code != owner.adviser_code)
+    query = scope_commissions(query)
 
     if adviser_code:
         query = query.filter_by(adviser_code=adviser_code)

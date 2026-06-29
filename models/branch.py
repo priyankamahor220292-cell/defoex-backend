@@ -1,5 +1,6 @@
 from extensions import db
 from datetime import datetime
+from utils.helpers import branch_manager_display_name
 
 class Branch(db.Model):
     __tablename__ = 'branches'
@@ -26,7 +27,7 @@ class Branch(db.Model):
             'city': self.city,
             'state': self.state,
             'pincode': self.pincode,
-            'manager_name': self.manager_name,
+            'manager_name': branch_manager_display_name(self.manager_name),
             'manager_email': self.manager_email,
             'manager_mobile': self.manager_mobile,
             'is_active': self.is_active,

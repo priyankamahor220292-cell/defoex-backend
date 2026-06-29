@@ -105,6 +105,11 @@ class Investment(db.Model):
             roi_pct     = None
             roi_display = MIS_PLANS.get(self.plan_tenure, {}).get('roi_display')
 
+        paid = self.installments_paid or 0
+        total_inst = self.total_installments or 0
+        monthly = float(self.monthly_amount) if self.monthly_amount else 0
+        tri = round(paid * monthly, 2) if paid and monthly else 0
+
         return {
             'id':                      self.id,
             'irn':                     self.irn,
@@ -125,8 +130,13 @@ class Investment(db.Model):
             'roi_display':             roi_display,
             'plan_fee':                float(self.plan_fee) if self.plan_fee else 0,
             'payment_mode':            self.payment_mode,
-            'installments_paid':       self.installments_paid or 0,
-            'total_installments':      self.total_installments,
+            'installments_paid':       paid,
+            'total_installments':      total_inst,
+            'total_received_investment': tri,
+            'tri':                     tri,
+            'installment_status':    (
+                f'{paid} of {total_inst}' if total_inst else f'{paid} of 0'
+            ),
             'adviser_code':            self.adviser_code,
             'approval_status':         self.approval_status,
             'status':                  self.status,

@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
+import secrets
 from models.user import User
 from models.branch import Branch
 from extensions import db
@@ -40,7 +41,9 @@ def create_user():
     user.set_password(data['password'])
     db.session.add(user)
     db.session.commit()
-    return jsonify(success_response(user.to_dict(), 'User created')[0]), 201
+    payload = user.to_dict()
+    payload['password'] = data['password']
+    return jsonify(success_response(payload, 'User created')[0]), 201
 
 
 @users_bp.route('/<int:user_id>', methods=['PUT'])
@@ -57,3 +60,36 @@ def update_user(user_id):
             setattr(user, field, data[field])
     db.session.commit()
     return jsonify(success_response(user.to_dict(), 'User updated')[0]), 200
+
+
+@users_bp.route('/<int:user_id>/reset-password', methods=['POST'])
+@jwt_required()
+def reset_password(user_id):
+    """Super Admin only — set or auto-generate a user's login password."""
+    claims = get_jwt()
+    if claims.get('role') != 'superadmin':
+        return jsonify(error_response('Unauthorized', 403)[0]), 403
+
+    user = User.query.get_or_404(user_id)
+    data = request.get_json(silent=True) or {}
+
+    password = (data.get('password') or '').strip()
+    if not password:
+        password = secrets.token_hex(5)
+    elif len(password) < 6:
+        return jsonify(error_response('Password must be at least 6 characters', 400)[0]), 400
+
+    user.set_password(password)
+    db.session.commit()
+
+    return jsonify(success_response({
+        'id': user.id,
+        'username': user.username,
+        'full_name': user.full_name,
+        'role': user.role,
+        'password': password,
+        'message': (
+            f'Password reset for {user.username}. '
+            f'Share the new password securely with the user.'
+        ),
+    }, 'Password reset successfully')[0]), 200

@@ -1,6 +1,7 @@
 from extensions import db
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
+from utils.helpers import branch_manager_display_name
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -26,11 +27,14 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
     def to_dict(self):
+        full_name = self.full_name
+        if self.role == 'branchmanager':
+            full_name = branch_manager_display_name(full_name)
         return {
             'id': self.id,
             'username': self.username,
             'email': self.email,
-            'full_name': self.full_name,
+            'full_name': full_name,
             'mobile': self.mobile,
             'role': self.role,
             'branch_id': self.branch_id,

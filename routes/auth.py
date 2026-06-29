@@ -6,7 +6,7 @@ from flask_jwt_extended import (
 from models.user import User
 from models.branch_wallet import BranchWallet
 from extensions import db
-from utils.helpers import success_response, error_response
+from utils.helpers import success_response, error_response, branch_manager_display_name
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
@@ -45,7 +45,11 @@ def login():
     additional_claims = {
         'role': user.role,
         'branch_id': user.branch_id,
-        'full_name': user.full_name
+        'full_name': (
+            branch_manager_display_name(user.full_name)
+            if user.role == 'branchmanager'
+            else user.full_name
+        ),
     }
 
     # Get wallet info if branch manager
@@ -77,7 +81,11 @@ def refresh():
     additional_claims = {
         'role': user.role,
         'branch_id': user.branch_id,
-        'full_name': user.full_name
+        'full_name': (
+            branch_manager_display_name(user.full_name)
+            if user.role == 'branchmanager'
+            else user.full_name
+        ),
     }
     access_token = create_access_token(identity=identity, additional_claims=additional_claims)
     return jsonify(success_response({'access_token': access_token})[0]), 200
@@ -102,13 +110,27 @@ def logout():
 @auth_bp.route('/change-password', methods=['POST'])
 @jwt_required()
 def change_password():
+    claims = get_jwt() or {}
+    if claims.get('role') != 'superadmin':
+        return jsonify(error_response(
+            'Password changes are restricted. Contact Super Admin to reset your password.',
+            403
+        )[0]), 403
+
     identity = get_jwt_identity()
     user = User.query.get(int(identity))
-    data = request.get_json()
+    if not user:
+        return jsonify(error_response('User not found', 404)[0]), 404
+
+    data = request.get_json(silent=True) or {}
 
     if not user.check_password(data.get('current_password', '')):
         return jsonify(error_response('Current password is incorrect', 400)[0]), 400
 
-    user.set_password(data.get('new_password', ''))
+    new_password = (data.get('new_password') or '').strip()
+    if len(new_password) < 6:
+        return jsonify(error_response('New password must be at least 6 characters', 400)[0]), 400
+
+    user.set_password(new_password)
     db.session.commit()
     return jsonify(success_response(message='Password changed successfully')[0]), 200

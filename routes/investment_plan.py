@@ -26,14 +26,14 @@ from models.member import Member
 from models.adviser import Adviser
 from models.branch import Branch
 from models.user import User
-from utils.helpers import success_response, error_response, generate_irn
+from utils.helpers import success_response, error_response, generate_investment_plan_id
 from utils.member_lookup import (
     resolve_member_from_code,
     link_adviser_investor,
     find_adviser_identity,
     find_member_for_adviser,
 )
-from utils.branch_wallet_ops import deduct_branch_wallet
+from utils.branch_wallet_ops import deduct_branch_wallet, refund_branch_wallet
 
 investment_plan_bp = Blueprint('investment_plan', __name__, url_prefix='/api/investment-plans')
 
@@ -331,7 +331,7 @@ def create_mis_plan():
         payment_mode_enum = _normalize_payment_mode(payment_mode)
 
         investment = Investment(
-            irn                     = generate_irn(),
+            irn                     = generate_investment_plan_id(branch.id, 'MIS'),
             investor_id             = member.investor_id,
             adviser_code            = member.adviser_code,
             branch_id               = branch.id,
@@ -348,7 +348,6 @@ def create_mis_plan():
             due_date                = investment_date + relativedelta(months=1),
             payment_mode            = payment_mode_enum,
             approval_status         = 'Pending',
-            status                  = 'Active',
         )
         db.session.add(investment)
         db.session.flush()
@@ -364,21 +363,13 @@ def create_mis_plan():
         )
         db.session.add(inst)
 
-        identity = get_jwt_identity()
-        wallet_result, wallet_err = _deduct_investment_payment(
-            investment, float(amount), created_by=identity, note=' — 1st installment'
-        )
-        if wallet_err:
-            db.session.rollback()
-            return jsonify({'success': False, 'message': wallet_err}), 400
-
         db.session.commit()
 
         return jsonify({
             'success': True,
             'message': (
                 f'MIS Plan created for {member.full_name}. '
-                f'₹{float(amount):,.0f} deducted from branch limit → cash wallet.'
+                f'Awaiting branch manager approval.'
             ),
             'data': {
                 'investment_id':         investment.id,
@@ -392,7 +383,7 @@ def create_mis_plan():
                 'investment_date':       investment_date.isoformat(),
                 'maturity_date':         maturity_date.isoformat(),
                 'payment_mode':          payment_mode,
-                'wallet':                wallet_result,
+                'approval_status':       'Pending',
             }
         }), 201
 
@@ -453,7 +444,7 @@ def create_sis_plan():
         payment_mode_enum = _normalize_payment_mode(payment_mode)
 
         investment = Investment(
-            irn                     = generate_irn(),
+            irn                     = generate_investment_plan_id(branch.id, 'SIS'),
             investor_id             = member.investor_id,
             adviser_code            = member.adviser_code,
             branch_id               = branch.id,
@@ -470,7 +461,6 @@ def create_sis_plan():
             due_date                = investment_date + relativedelta(months=1),
             payment_mode            = payment_mode_enum,
             approval_status         = 'Pending',
-            status                  = 'Active',
         )
         db.session.add(investment)
         db.session.flush()
@@ -486,21 +476,13 @@ def create_sis_plan():
         )
         db.session.add(inst)
 
-        identity = get_jwt_identity()
-        wallet_result, wallet_err = _deduct_investment_payment(
-            investment, float(amount), created_by=identity, note=' — lump sum'
-        )
-        if wallet_err:
-            db.session.rollback()
-            return jsonify({'success': False, 'message': wallet_err}), 400
-
         db.session.commit()
 
         return jsonify({
             'success': True,
             'message': (
                 f'SIS Plan created for {member.full_name}. '
-                f'₹{float(amount):,.0f} deducted from branch limit → cash wallet.'
+                f'Awaiting branch manager approval.'
             ),
             'data': {
                 'investment_id':   investment.id,
@@ -512,7 +494,7 @@ def create_sis_plan():
                 'investment_date': investment_date.isoformat(),
                 'maturity_date':   maturity_date.isoformat(),
                 'payment_mode':    payment_mode,
-                'wallet':          wallet_result,
+                'approval_status': 'Pending',
             }
         }), 201
 
@@ -677,13 +659,39 @@ def approve_investment(investment_id):
                 return jsonify({'success': False, 'message': wallet_err}), 400
 
             investment.approval_status = 'Approved'
+            investment.status = 'Active'
             investment.approved_at = datetime.utcnow()
+
+            first_inst = Installment.query.filter_by(
+                investment_id=investment.id, installment_number=1
+            ).first()
+            if first_inst:
+                first_inst.status = 'Paid'
+                first_inst.paid_date = date.today()
+            investment.installments_paid = 1
+
             msg = (
                 f'Investment plan approved. '
                 f'₹{deduct_amount:,.0f} deducted from branch limit → cash wallet.'
             )
         else:
+            deduct_amount = float(investment.monthly_amount or 0)
+            wallet_result, wallet_err = refund_branch_wallet(
+                investment.branch_id,
+                deduct_amount,
+                (
+                    f'{investment.plan_type} plan rejected — {investment.investor_id} '
+                    f'({investment.irn})'
+                ),
+                reference_id=f'INVEST-{investment.id}',
+                created_by=identity,
+            )
+            if wallet_err:
+                db.session.rollback()
+                return jsonify({'success': False, 'message': wallet_err}), 400
+
             investment.approval_status = 'Rejected'
+            investment.status = 'Cancelled'
             msg = 'Investment plan rejected'
 
         db.session.commit()
@@ -764,6 +772,10 @@ def list_investments():
             q = q.filter_by(approval_status='Approved')
         elif s == 'rejected':
             q = q.filter_by(approval_status='Rejected')
+        elif s == 'active':
+            q = q.filter_by(approval_status='Approved', status='Active')
+        elif s in ('completed', 'cancelled'):
+            q = q.filter_by(status=s.title())
         else:
             q = q.filter_by(status=status.title())
 
@@ -777,4 +789,126 @@ def list_investments():
         'page':     page,
         'per_page': per_page,
         'pages':    paginated.pages,
+    }), 200
+
+
+# ─── INVESTMENT RECEIPT ───────────────────────────────────────────────────────
+
+def _fmt_receipt_date(d):
+    if not d:
+        return date.today().strftime('%d %B %Y').lstrip('0')
+    if isinstance(d, str):
+        try:
+            d = datetime.strptime(d[:10], '%Y-%m-%d').date()
+        except ValueError:
+            return d
+    return d.strftime('%d %B %Y').lstrip('0')
+
+
+def _fmt_due_date_upper(d):
+    if not d:
+        return '—'
+    if isinstance(d, str):
+        try:
+            d = datetime.strptime(d[:10], '%Y-%m-%d').date()
+        except ValueError:
+            return str(d).upper()
+    return d.strftime('%d %B %Y').lstrip('0').upper()
+
+
+def _receipt_plan_label(investment):
+    amount = int(float(investment.monthly_amount or 0))
+    if investment.plan_type == 'SIS':
+        return f'SISLT{amount}'
+    tenure = investment.plan_tenure or ''
+    return f'MIS{tenure}{amount}'
+
+
+def _generate_receipt_no(investment, installments_paid):
+    raw = int(f'{investment.branch_id or 0}{investment.id}{max(installments_paid, 1)}')
+    return str(raw).zfill(8)
+
+
+@investment_plan_bp.route('/receipt/<irn>', methods=['GET'])
+@jwt_required()
+def investment_receipt(irn):
+    """Investment installment receipt data for branch manager / superadmin."""
+    claims = get_jwt() or {}
+    role = (claims.get('role') or '').lower()
+
+    investment = Investment.query.filter_by(irn=irn).first()
+    if not investment:
+        return jsonify({'success': False, 'message': 'Investment plan not found'}), 404
+
+    if role not in ('superadmin', 'branchmanager'):
+        return jsonify({'success': False, 'message': 'Unauthorized'}), 403
+
+    if role == 'branchmanager':
+        branch, err = _get_current_branch()
+        if err:
+            return jsonify({'success': False, 'message': err}), 400
+        if investment.branch_id != branch.id:
+            return jsonify({'success': False, 'message': 'Investment not in your branch'}), 403
+
+    member = Member.query.filter_by(investor_id=investment.investor_id).first()
+    if not member:
+        return jsonify({'success': False, 'message': 'Investor not found'}), 404
+
+    paid = investment.installments_paid or 0
+    total = investment.total_installments or 0
+    monthly = float(investment.monthly_amount or 0)
+    is_sis = investment.plan_type == 'SIS'
+
+    if is_sis:
+        tri = int(monthly) if paid else 0
+    else:
+        tri = int(round(paid * monthly, 0)) if paid and monthly else 0
+
+    roi_amount = int(float(investment.total_maturity_amount or 0))
+
+    last_paid = Installment.query.filter_by(
+        investment_id=investment.id, status='Paid'
+    ).order_by(Installment.installment_number.desc()).first()
+
+    receipt_date = last_paid.paid_date if last_paid and last_paid.paid_date else date.today()
+    payment_mode = (last_paid.payment_mode if last_paid and last_paid.payment_mode
+                    else investment.payment_mode or 'Cash')
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'irn': investment.irn,
+            'receipt_no': _generate_receipt_no(investment, paid),
+            'receipt_date': _fmt_receipt_date(receipt_date),
+            'receipt_date_iso': receipt_date.isoformat() if hasattr(receipt_date, 'isoformat') else str(receipt_date),
+            'company_name': 'DEFOEX INTRATECH PRIVATE LIMITED',
+            'document_title': 'INVESTMENT RECEIPT',
+            'investment_id': investment.irn,
+            'investor_id': member.investor_id,
+            'investor_name': member.full_name,
+            'mobile': member.mobile,
+            'plan_name': _receipt_plan_label(investment),
+            'plan_type': investment.plan_type,
+            'investment_term': 'Monthly',
+            'status_label': f'{paid} out of {total}' if total else f'{paid} out of 0',
+            'final_investment': int(monthly),
+            'late_fee': 0,
+            'next_due_date': _fmt_due_date_upper(investment.due_date),
+            'total_received': tri,
+            'return_of_investment': roi_amount,
+            'payment_mode': (payment_mode or 'Cash').upper(),
+            'remarks': (
+                'Received with thanks towards the monthly investment installment '
+                'under the selected investment plan.'
+            ),
+            'installments_paid': paid,
+            'total_installments': total,
+            'investor': {
+                'investor_id': member.investor_id,
+                'full_name': member.full_name,
+                'mobile': member.mobile,
+            },
+            'investment': investment.to_dict(),
+            'printed_at': datetime.utcnow().isoformat(),
+        }
     }), 200

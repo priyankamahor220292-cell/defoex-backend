@@ -9,6 +9,7 @@ from utils.helpers import (
     success_response, error_response, paginate_query,
     normalize_mobile, find_member_by_mobile,
 )
+from utils.role_scoping import scope_members, current_role, current_adviser
 from datetime import datetime, date
 import traceback
 
@@ -49,42 +50,12 @@ def check_adviser():
     if not code:
         return jsonify(error_response('Please enter an adviser code')[0]), 400
 
-    # Block IRN codes
-    if 'DFX-IRN-' in code.upper():
-        return jsonify(error_response(
-            'That is an Investment Bond number, not an adviser code. '
-            'Adviser codes look like DFX-2026-000001.'
-        )[0]), 400
-
-    # Find adviser — try code, login username, or DEFAD user
-    from utils.member_lookup import find_adviser_by_code_or_login, find_adviser_for_user
-    from models.user import User
-
-    adviser = find_adviser_by_code_or_login(code)
-    if not adviser:
-        user = User.query.filter(db.func.upper(User.username) == code.upper()).first()
-        if user:
-            adviser = find_adviser_for_user(user)
-    if not adviser:
-        adviser = Adviser.query.filter_by(adviser_code=code, is_active=True).first()
-
-    # Try old ADV format if not found  (DFX-ADV-2026-000001)
-    if not adviser and not code.startswith('DFX-ADV-'):
-        adviser = Adviser.query.filter_by(
-            adviser_code='DFX-ADV-' + code.replace('DFX-', '', 1),
-            is_active=True
-        ).first()
-
-    if not adviser:
-        # Show available codes to help the user
-        codes = [a.adviser_code for a in
-                 Adviser.query.filter_by(is_active=True).limit(10).all()]
-        msg = f'Adviser code "{code}" not found.'
-        if codes:
-            msg += f' Available codes: {", ".join(codes)}'
-        return jsonify(error_response(msg, 404)[0]), 404
-
+    from utils.member_lookup import find_promoter_adviser
     from utils.rank_helpers import allowed_ranks_for_promoter, rank_label
+
+    adviser, err = find_promoter_adviser(code)
+    if err:
+        return jsonify(error_response(err, 404)[0]), 404
 
     promoter_rank = int(adviser.rank_id or 1)
     payload = adviser.to_dict()
@@ -272,6 +243,9 @@ def pending_registrations():
     page      = request.args.get('page', 1, type=int)
 
     role  = claims.get('role', '')
+    if role in ('advisor', 'adviser'):
+        return jsonify(error_response('Advisers cannot view pending approvals', 403)[0]), 403
+
     query = Member.query.filter_by(approval_status='Pending')
     if branch_id:
         query = query.filter_by(branch_id=branch_id)
@@ -295,8 +269,7 @@ def list_investors():
         page      = request.args.get('page', 1, type=int)
 
         query = Member.query.filter_by(approval_status='Approved')
-        if branch_id and claims.get('role') == 'branchmanager':
-            query = query.filter_by(branch_id=branch_id)
+        query = scope_members(query)
 
         if date_from:
             df = safe_date(date_from)
@@ -354,6 +327,13 @@ def get_investor(investor_id):
     member = Member.query.filter_by(investor_id=investor_id).first()
     if not member:
         return jsonify(error_response('Investor not found', 404)[0]), 404
+
+    role = current_role()
+    if role in ('advisor', 'adviser'):
+        adviser = current_adviser()
+        if not adviser or member.adviser_code != adviser.adviser_code:
+            return jsonify(error_response('Investor not found', 404)[0]), 404
+
     return jsonify(success_response(member.to_dict())[0]), 200
 
 
