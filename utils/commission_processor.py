@@ -4,7 +4,7 @@ Commission Processor
 Called when an investment plan is approved.
 Uses raw SQL to avoid PostgreSQL Enum type issues.
 """
-from utils.commission_engine import calculate_all_commissions
+from utils.commission_engine import calculate_all_commissions, calc_company_flat_commission
 from models.adviser import Adviser
 from extensions import db
 from sqlalchemy import text
@@ -52,6 +52,29 @@ def process_investment_commissions(investment):
         }
 
         records = calculate_all_commissions(inv_dict, chain)
+
+        if not any(r.get('commission_type') == 'Company Flat' for r in records):
+            owner = Adviser.query.filter_by(is_company_owner=True).first()
+            if owner:
+                base = inv_dict['monthly_amount'] if inv_dict['plan_type'] == 'MIS' \
+                    else inv_dict['total_investment_amount']
+                rate, amount = calc_company_flat_commission(base)
+                if amount > 0:
+                    from utils.commission_engine import RANK_NAMES
+                    records.append({
+                        'adviser_code': owner.adviser_code,
+                        'adviser_name': owner.full_name,
+                        'adviser_rank_id': owner.rank_id or 20,
+                        'adviser_rank': RANK_NAMES.get(owner.rank_id or 20, 'House 8'),
+                        'commission_type': 'Company Flat',
+                        'plan_type': inv_dict['plan_type'],
+                        'plan_tenure': inv_dict['plan_tenure'],
+                        'base_amount': base,
+                        'commission_rate': rate,
+                        'commission_amount': amount,
+                        'status': 'Pending',
+                    })
+
         saved   = []
 
         for r in records:

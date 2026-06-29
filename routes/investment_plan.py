@@ -27,6 +27,7 @@ from models.adviser import Adviser
 from models.branch import Branch
 from models.user import User
 from utils.helpers import success_response, error_response, generate_investment_plan_id
+from utils.role_scoping import sanitize_response, current_role, should_hide_branch
 from utils.member_lookup import (
     resolve_member_from_code,
     link_adviser_investor,
@@ -782,9 +783,13 @@ def list_investments():
     q = q.order_by(Investment.created_at.desc())
     paginated = q.paginate(page=page, per_page=per_page, error_out=False)
 
+    items = [inv.to_dict() for inv in paginated.items]
+    if should_hide_branch(current_role()):
+        items = sanitize_response(items)
+
     return jsonify({
         'success': True,
-        'data': [inv.to_dict() for inv in paginated.items],
+        'data': items,
         'total':    paginated.total,
         'page':     page,
         'per_page': per_page,

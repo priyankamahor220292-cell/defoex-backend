@@ -41,7 +41,10 @@ def list_commissions():
 @jwt_required()
 def commission_chart():
     from models.commission import MIS_COMMISSION_RATES, SIS_COMMISSION_RATES
+    from utils.commission_engine import COMPANY_CODE_FLAT_RATE
     return jsonify(success_response({
         'mis': MIS_COMMISSION_RATES,
         'sis': SIS_COMMISSION_RATES,
+        'company_code_flat_rate': COMPANY_CODE_FLAT_RATE,
+        'company_code_note': 'DEFOEX CODE (Rank 20) — flat 2% on every investment',
     })[0]), 200

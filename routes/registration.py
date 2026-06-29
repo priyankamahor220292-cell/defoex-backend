@@ -9,7 +9,7 @@ from utils.helpers import (
     success_response, error_response, paginate_query,
     normalize_mobile, find_member_by_mobile,
 )
-from utils.role_scoping import scope_members, current_role, current_adviser
+from utils.role_scoping import scope_members, current_role, current_adviser, sanitize_response
 from datetime import datetime, date
 import traceback
 
@@ -75,7 +75,7 @@ def check_adviser():
     else:
         payload['allowed_rank_error'] = rank_err
 
-    return jsonify(success_response(payload, 'Adviser verified')[0]), 200
+    return jsonify(success_response(sanitize_response(payload), 'Adviser verified')[0]), 200
 
 
 @registration_bp.route('/new', methods=['POST'])
@@ -334,7 +334,7 @@ def get_investor(investor_id):
         if not adviser or member.adviser_code != adviser.adviser_code:
             return jsonify(error_response('Investor not found', 404)[0]), 404
 
-    return jsonify(success_response(member.to_dict())[0]), 200
+    return jsonify(success_response(sanitize_response(member.to_dict()))[0]), 200
 
 
 @registration_bp.route('/<int:member_id>/blacklist', methods=['POST'])

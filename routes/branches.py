@@ -4,6 +4,7 @@ from models.branch import Branch
 from models.branch_wallet import BranchWallet, WalletTransaction, AdminWallet, ADMIN_WALLET_LIMIT
 from extensions import db
 from utils.helpers import success_response, error_response
+from utils.role_scoping import branch_access_error, should_hide_branch
 from sqlalchemy import text
 import traceback
 
@@ -54,7 +55,20 @@ def _ensure_admin_wallet():
 @jwt_required()
 def list_branches():
     try:
-        branches = Branch.query.filter_by(is_active=True).all()
+        claims = get_jwt() or {}
+        role = (claims.get('role') or '').lower()
+
+        if should_hide_branch(role):
+            return jsonify(error_response('Unauthorized', 403)[0]), 403
+
+        q = Branch.query.filter_by(is_active=True)
+        if role == 'branchmanager':
+            branch_id = claims.get('branch_id')
+            if not branch_id:
+                return jsonify(success_response([])[0]), 200
+            q = q.filter_by(id=int(branch_id))
+
+        branches = q.all()
         result = []
         for b in branches:
             d = b.to_dict()
@@ -70,6 +84,10 @@ def list_branches():
 @branches_bp.route('/<int:branch_id>', methods=['GET'])
 @jwt_required()
 def get_branch(branch_id):
+    denied = branch_access_error(branch_id)
+    if denied:
+        return jsonify(error_response(denied, 403)[0]), 403
+
     branch = Branch.query.get_or_404(branch_id)
     data   = branch.to_dict()
     wallet = _ensure_wallet(branch_id)
@@ -250,6 +268,10 @@ def topup_branch_wallet(branch_id):
 @branches_bp.route('/<int:branch_id>/wallet-history', methods=['GET'])
 @jwt_required()
 def wallet_history(branch_id):
+    denied = branch_access_error(branch_id)
+    if denied:
+        return jsonify(error_response(denied, 403)[0]), 403
+
     try:
         page = request.args.get('page', 1, type=int)
         txns = WalletTransaction.query\

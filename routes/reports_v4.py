@@ -5,7 +5,7 @@ from models.member import Member
 from models.branch_wallet import BranchWallet
 from extensions import db
 from utils.helpers import success_response, error_response
-from utils.role_scoping import scope_members, scope_investments, current_adviser, current_role
+from utils.role_scoping import scope_members, scope_investments, current_adviser, current_role, sanitize_response
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import func, false
@@ -294,12 +294,13 @@ def global_search():
             results['advisers'] = [a.to_dict() for a in adv_q.limit(10).all()]
 
         total = sum(len(v) for v in results.values())
-        return jsonify(success_response({
+        payload = {
             'query':   query,
             'search_by': search_by,
             'total':   total,
             **results,
-        })[0]), 200
+        }
+        return jsonify(success_response(sanitize_response(payload))[0]), 200
 
     except Exception as e:
         print(traceback.format_exc())

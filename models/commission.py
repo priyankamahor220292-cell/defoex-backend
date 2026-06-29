@@ -65,6 +65,10 @@ class Commission(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def to_dict(self):
+        ctype = getattr(self, 'commission_type', None) or 'Direct'
+        display_type = 'Team Benefits' if ctype in ('Team', 'Upper Rank') else (
+            'Direct Benefits' if ctype == 'Direct' else ctype
+        )
         return {
             'id': self.id,
             'investment_id': self.investment_id,
@@ -73,9 +77,12 @@ class Commission(db.Model):
             'plan_type': self.plan_type,
             'plan_tenure': self.plan_tenure,
             'investment_amount': float(self.investment_amount) if self.investment_amount else None,
+            'base_amount': float(self.investment_amount) if self.investment_amount else None,
             'commission_rate': float(self.commission_rate) if self.commission_rate else None,
             'commission_amount': float(self.commission_amount) if self.commission_amount else None,
+            'commission_type': ctype,
+            'benefit_type': display_type,
             'status': self.status,
             'paid_at': self.paid_at.isoformat() if self.paid_at else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'created_at': self.created_at.isoformat() if self.created_at else None,
         }

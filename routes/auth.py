@@ -7,6 +7,7 @@ from models.user import User
 from models.branch_wallet import BranchWallet
 from extensions import db
 from utils.helpers import success_response, error_response, branch_manager_display_name
+from utils.role_scoping import user_public_dict
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
@@ -65,7 +66,7 @@ def login():
     return jsonify(success_response({
         'access_token': access_token,
         'refresh_token': refresh_token,
-        'user': user.to_dict(),
+        'user': user_public_dict(user),
         'wallet': wallet_info
     }, 'Login successful')[0]), 200
 
@@ -98,7 +99,7 @@ def me():
     user = User.query.get(int(identity))
     if not user:
         return jsonify(error_response('User not found', 404)[0]), 404
-    return jsonify(success_response(user.to_dict())[0]), 200
+    return jsonify(success_response(user_public_dict(user))[0]), 200
 
 
 @auth_bp.route('/logout', methods=['POST'])

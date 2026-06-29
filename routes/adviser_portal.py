@@ -11,6 +11,7 @@ from models.investment import Investment
 from models.commission import Commission
 from extensions import db
 from utils.helpers import success_response, error_response
+from utils.role_scoping import sanitize_response
 from sqlalchemy import text
 import traceback
 
@@ -76,6 +77,47 @@ def get_downline_codes(adviser_code, max_depth=10):
     return result
 
 
+TEAM_BENEFIT_TYPES = ('Team', 'Upper Rank')
+
+
+def _commission_sum(adviser_code, types=None):
+    q = db.session.query(db.func.sum(Commission.commission_amount)).filter(
+        Commission.adviser_code == adviser_code
+    )
+    if types:
+        q = q.filter(Commission.commission_type.in_(types))
+    return float(q.scalar() or 0)
+
+
+def _business_volume(adviser_codes):
+    if not adviser_codes:
+        return 0.0
+    return float(
+        db.session.query(db.func.sum(Investment.total_investment_amount)).filter(
+            Investment.adviser_code.in_(list(adviser_codes)),
+            Investment.approval_status == 'Approved',
+        ).scalar() or 0
+    )
+
+
+def _benefits_summary(adviser):
+    """Direct / Team benefits and business volumes for adviser panel."""
+    code = adviser.adviser_code
+    downline = get_downline_codes(code)
+    direct_benefits = _commission_sum(code, ('Direct',))
+    team_benefits = _commission_sum(code, TEAM_BENEFIT_TYPES)
+    self_business = _business_volume({code})
+    team_business = _business_volume(downline)
+    return {
+        'direct_benefits':     direct_benefits,
+        'team_benefits':       team_benefits,
+        'total_benefits':      direct_benefits + team_benefits,
+        'self_business':       self_business,
+        'team_business':       team_business,
+        'total_business_volume': self_business + team_business,
+    }
+
+
 # ── Dashboard ─────────────────────────────────────────────────────
 @adviser_portal_bp.route('/dashboard', methods=['GET'])
 @jwt_required()
@@ -85,30 +127,30 @@ def adviser_dashboard():
         return jsonify(error_response(err or 'Adviser not found', 404)[0]), 404
 
     downline_codes = get_downline_codes(adviser.adviser_code)
-    all_codes      = {adviser.adviser_code} | downline_codes
+    benefits       = _benefits_summary(adviser)
 
     # Counts
     my_investors    = Member.query.filter_by(adviser_code=adviser.adviser_code, approval_status='Approved').count()
     my_investments  = Investment.query.filter_by(adviser_code=adviser.adviser_code, approval_status='Approved').count()
     down_investors  = Member.query.filter(Member.adviser_code.in_(downline_codes), Member.approval_status=='Approved').count() if downline_codes else 0
     down_investments= Investment.query.filter(Investment.adviser_code.in_(downline_codes), Investment.approval_status=='Approved').count() if downline_codes else 0
-    total_business  = db.session.query(db.func.sum(Investment.total_investment_amount)).filter(
-        Investment.adviser_code.in_(all_codes), Investment.approval_status=='Approved'
-    ).scalar() or 0
-    my_commission   = db.session.query(db.func.sum(Commission.commission_amount)).filter_by(
-        adviser_code=adviser.adviser_code
-    ).scalar() or 0
+    total_business  = benefits['total_business_volume']
+    my_commission   = benefits['total_benefits']
 
-    return jsonify(success_response({
+    return jsonify(success_response(sanitize_response({
         'adviser':          adviser.to_dict(),
         'my_investors':     my_investors,
         'my_investments':   my_investments,
         'down_investors':   down_investors,
         'down_investments': down_investments,
-        'total_business':   float(total_business),
-        'my_commission':    float(my_commission),
+        'total_business':   total_business,
+        'my_commission':    my_commission,
+        'direct_benefits':  benefits['direct_benefits'],
+        'team_benefits':    benefits['team_benefits'],
+        'self_business':    benefits['self_business'],
+        'team_business':    benefits['team_business'],
         'downline_count':   len(downline_codes),
-    })[0]), 200
+    }))[0]), 200
 
 
 # ── Adviser Info ──────────────────────────────────────────────────
@@ -132,18 +174,23 @@ def adviser_info():
     ).count()
 
     # Commissions
+    benefits = _benefits_summary(adviser)
     commissions = Commission.query.filter_by(adviser_code=adviser.adviser_code).all()
-    total_comm  = sum(float(c.commission_amount or 0) for c in commissions)
+    total_comm  = benefits['total_benefits']
     paid_comm   = sum(float(c.commission_amount or 0) for c in commissions if c.status == 'Paid')
 
-    return jsonify(success_response({
+    return jsonify(success_response(sanitize_response({
         **adviser.to_dict(),
         'promoter':         promoter,
         'investors_count':  investors_count,
         'total_commission': total_comm,
         'paid_commission':  paid_comm,
         'pending_commission': total_comm - paid_comm,
-    })[0]), 200
+        'direct_benefits':  benefits['direct_benefits'],
+        'team_benefits':    benefits['team_benefits'],
+        'self_business':    benefits['self_business'],
+        'team_business':    benefits['team_business'],
+    }))[0]), 200
 
 
 # ── Self Contribution Info ────────────────────────────────────────
@@ -184,7 +231,7 @@ def self_contribution():
         d['investor_mobile'] = member.mobile    if member else None
         items.append(d)
 
-    return jsonify(success_response({
+    return jsonify(success_response(sanitize_response({
         'adviser_code':     adviser.adviser_code,
         'adviser_name':     adviser.full_name,
         'items':            items,
@@ -192,7 +239,7 @@ def self_contribution():
         'pages':            (total + per_page - 1) // per_page,
         'total_business':   float(total_business),
         'direct_commission':float(my_commission),
-    })[0]), 200
+    }))[0]), 200
 
 
 # ── Down Contribution Info ────────────────────────────────────────
@@ -214,13 +261,13 @@ def down_contribution():
     downline_codes = get_downline_codes(adviser.adviser_code)
 
     if not downline_codes:
-        return jsonify(success_response({
+        return jsonify(success_response(sanitize_response({
             'items':          [],
             'total':          0,
             'total_business': 0,
             'downline_count': 0,
             'by_adviser':     [],
-        })[0]), 200
+        }))[0]), 200
 
     offset = (page - 1) * per_page
 
@@ -239,9 +286,7 @@ def down_contribution():
         Investment.approval_status == 'Approved'
     ).scalar() or 0
 
-    upper_commission = db.session.query(db.func.sum(Commission.commission_amount)).filter_by(
-        adviser_code=adviser.adviser_code, commission_type='Upper Rank'
-    ).scalar() or 0
+    upper_commission = _commission_sum(adviser.adviser_code, TEAM_BENEFIT_TYPES)
 
     # Group by adviser
     by_adviser = []
@@ -269,12 +314,13 @@ def down_contribution():
         d['adviser_name']    = adv.full_name     if adv    else None
         items.append(d)
 
-    return jsonify(success_response({
+    return jsonify(success_response(sanitize_response({
         'items':            items,
         'total':            total,
         'pages':            (total + per_page - 1) // per_page,
         'total_business':   float(total_business),
         'upper_commission': float(upper_commission),
+        'team_benefits':    float(upper_commission),
         'downline_count':   len(downline_codes),
         'by_adviser':       sorted(by_adviser, key=lambda x: -x['business']),
-    })[0]), 200
+    }))[0]), 200
