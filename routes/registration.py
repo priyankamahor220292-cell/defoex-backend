@@ -161,7 +161,7 @@ def new_registration():
             investor_id      = investor_id,
             salutation       = data.get('salutation'),
             full_name        = str(data['full_name']).strip(),
-            father_spouse_name = data.get('father_spouse_name'),
+            father_spouse_name = str(data.get('father_spouse_name') or '').strip() or None,
             date_of_birth    = dob,
             age              = int(age) if age else None,
             gender           = safe_enum(data.get('gender'), ['Male','Female','Other']),
@@ -173,10 +173,10 @@ def new_registration():
             email            = email,
             is_senior_citizen= bool(data.get('is_senior_citizen', False)),
             is_special_roi   = bool(data.get('is_special_roi', False)),
-            corr_address     = data.get('corr_address') or None,
-            corr_state       = data.get('corr_state') or None,
-            corr_city        = data.get('corr_city') or None,
-            corr_pincode     = data.get('corr_pincode') or None,
+            corr_address     = str(data.get('corr_address') or '').strip() or None,
+            corr_state       = str(data.get('corr_state') or '').strip() or None,
+            corr_city        = str(data.get('corr_city') or '').strip() or None,
+            corr_pincode     = str(data.get('corr_pincode') or '').strip() or None,
             perm_address     = data.get('perm_address') or data.get('corr_address') or None,
             perm_state       = data.get('perm_state') or data.get('corr_state') or None,
             perm_city        = data.get('perm_city') or data.get('corr_city') or None,
@@ -188,9 +188,9 @@ def new_registration():
             voter_id         = data.get('voter_id') or None,
             driving_license  = data.get('driving_license') or None,
             verification_doc_type = data.get('verification_doc_type') or None,
-            nominee_name     = data.get('nominee_name') or None,
-            nominee_age      = int(nominee_age) if nominee_age else None,
-            nominee_relationship = data.get('nominee_relationship') or None,
+            nominee_name     = str(data.get('nominee_name') or '').strip() or None,
+            nominee_age      = int(nominee_age) if nominee_age is not None else None,
+            nominee_relationship = str(data.get('nominee_relationship') or '').strip() or None,
             nominee_address  = data.get('nominee_address') or None,
             nominee_state    = data.get('nominee_state') or None,
             nominee_city     = data.get('nominee_city') or None,
@@ -259,8 +259,13 @@ def approve_registration(member_id):
             return jsonify(error_response(
                 f'Investor is already {member.approval_status or "processed"}'
             )[0]), 400
-        from utils.investor_credentials import finalize_investor_registration
-        creds, err = finalize_investor_registration(member, identity)
+        try:
+            from utils.investor_credentials import finalize_investor_registration
+            creds, err = finalize_investor_registration(member, identity)
+        except Exception as e:
+            db.session.rollback()
+            print('Approve investor error:', traceback.format_exc())
+            return jsonify(error_response(f'Approval failed: {str(e)}')[0]), 500
         if err:
             return jsonify(error_response(err)[0]), 400
         msg = f'Registration approved for {member.full_name}'

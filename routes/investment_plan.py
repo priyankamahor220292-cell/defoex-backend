@@ -96,6 +96,19 @@ def _validate_upi_fields(data: dict):
     return transaction_id, upi_app, None
 
 
+PLAN_ADMIN_ROLES = frozenset({'superadmin', 'branchmanager'})
+
+
+def _require_plan_admin():
+    """Only branch manager / superadmin may create plans, contribute, or approve."""
+    if current_role() not in PLAN_ADMIN_ROLES:
+        return jsonify({
+            'success': False,
+            'message': 'Unauthorized — only branch manager or admin can perform this action',
+        }), 403
+    return None
+
+
 def _get_member_by_any_id(member_id: str):
     """Look up approved Member by investor ID, adviser code (DFX-*), or login ID (DEFAD*)."""
     return resolve_member_from_code(member_id)
@@ -189,6 +202,9 @@ def get_investor_details(member_id=None):
     Use ?member_id=DEFAD202608 so DEFAD IDs are not in the URL path (some
     browsers/ad blockers strip Authorization when the path contains "AD").
     """
+    denied = _require_plan_admin()
+    if denied:
+        return denied
     code = (
         member_id
         or request.args.get('member_id')
@@ -282,6 +298,9 @@ def create_mis_plan():
       upi_app        : str   (required if UPI: phonepe/paytm/gpay/bhim/other)
       investment_date: str   (YYYY-MM-DD, optional — defaults to today)
     """
+    denied = _require_plan_admin()
+    if denied:
+        return denied
     data = request.get_json(force=True) or {}
 
     # 1. Validate member
@@ -410,6 +429,9 @@ def create_sis_plan():
       upi_app        : str   (required if UPI)
       investment_date: str   (YYYY-MM-DD, optional)
     """
+    denied = _require_plan_admin()
+    if denied:
+        return denied
     data = request.get_json(force=True) or {}
 
     member, err = _get_member_by_any_id(data.get('investor_id', ''))
@@ -521,6 +543,9 @@ def mis_contribution():
       upi_app        : str   (required if UPI)
       payment_date   : str   (YYYY-MM-DD, optional)
     """
+    denied = _require_plan_admin()
+    if denied:
+        return denied
     data = request.get_json(force=True) or {}
 
     investment_id = data.get('investment_id')
@@ -634,6 +659,9 @@ def approve_investment(investment_id):
     On approve: deduct plan amount from branch limit → cash wallet (if not already
     deducted at create time), then mark approved.
     """
+    denied = _require_plan_admin()
+    if denied:
+        return denied
     data = request.get_json(force=True) or {}
     action = (data.get('action') or '').strip().lower()
     identity = get_jwt_identity()
