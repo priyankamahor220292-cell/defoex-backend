@@ -1,6 +1,6 @@
 from extensions import db
-from datetime import datetime
 from utils.helpers import branch_manager_display_name
+from utils.datetime_utils import now_ist, isoformat_ist
 
 class Branch(db.Model):
     __tablename__ = 'branches'
@@ -16,7 +16,7 @@ class Branch(db.Model):
     manager_email = db.Column(db.String(150))
     manager_mobile = db.Column(db.String(15))
     is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_ist)
 
     def to_dict(self):
         return {
@@ -31,5 +31,5 @@ class Branch(db.Model):
             'manager_email': self.manager_email,
             'manager_mobile': self.manager_mobile,
             'is_active': self.is_active,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'created_at': isoformat_ist(self.created_at)
         }

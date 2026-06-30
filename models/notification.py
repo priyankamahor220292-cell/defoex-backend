@@ -1,5 +1,5 @@
 from extensions import db
-from datetime import datetime
+from utils.datetime_utils import now_ist, isoformat_ist
 
 class Notification(db.Model):
     __tablename__ = 'notifications'
@@ -11,7 +11,7 @@ class Notification(db.Model):
     message = db.Column(db.Text)
     notification_type = db.Column(db.String(20), default='Info')
     is_read = db.Column(db.Boolean, default=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_ist)
 
     def to_dict(self):
         return {
@@ -22,5 +22,5 @@ class Notification(db.Model):
             'message': self.message,
             'notification_type': self.notification_type,
             'is_read': self.is_read,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'created_at': isoformat_ist(self.created_at)
         }

@@ -1,7 +1,7 @@
 from extensions import db
-from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils.helpers import branch_manager_display_name
+from utils.datetime_utils import now_ist, isoformat_ist
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -15,8 +15,8 @@ class User(db.Model):
     role = db.Column(db.String(20), nullable=False)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_ist)
+    updated_at = db.Column(db.DateTime, default=now_ist, onupdate=now_ist)
 
     branch = db.relationship('Branch', backref='users', lazy=True)
 
@@ -39,5 +39,5 @@ class User(db.Model):
             'role': self.role,
             'branch_id': self.branch_id,
             'is_active': self.is_active,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'created_at': isoformat_ist(self.created_at)
         }

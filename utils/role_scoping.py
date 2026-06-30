@@ -5,6 +5,7 @@ from sqlalchemy import false
 
 from models.user import User
 from utils.member_lookup import find_adviser_for_user
+from utils.datetime_utils import isoformat_ist
 
 ROLES_HIDE_BRANCH = frozenset({'advisor', 'adviser', 'member'})
 BRANCH_FIELD_KEYS = frozenset({
@@ -146,7 +147,7 @@ def user_public_dict(user):
         'mobile': user.mobile,
         'role': user.role,
         'is_active': user.is_active,
-        'created_at': user.created_at.isoformat() if user.created_at else None,
+        'created_at': isoformat_ist(user.created_at),
     }
     role = (user.role or '').lower()
     if role == 'branchmanager':

@@ -1,5 +1,5 @@
 from extensions import db
-from datetime import datetime
+from utils.datetime_utils import now_ist, isoformat_ist
 
 ADMIN_WALLET_LIMIT   = 10_00_00_00_000   # ₹100 Crore
 ADMIN_LOW_THRESHOLD  = 10_00_00_000      # ₹10 Crore
@@ -15,7 +15,7 @@ class BranchWallet(db.Model):
     current_balance       = db.Column(db.Numeric(18, 2), default=0)
     cash_wallet           = db.Column(db.Numeric(18, 2), default=0)
     low_balance_threshold = db.Column(db.Numeric(18, 2), default=BRANCH_LOW_THRESHOLD)
-    updated_at            = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at            = db.Column(db.DateTime, default=now_ist, onupdate=now_ist)
 
     branch = db.relationship('Branch', backref='wallet', uselist=False, lazy=True)
 
@@ -34,7 +34,7 @@ class BranchWallet(db.Model):
             'cash_wallet':           cash,
             'low_balance_threshold': thr,
             'is_low_balance':        bal <= thr,
-            'updated_at':            self.updated_at.isoformat() if self.updated_at else None,
+            'updated_at':            isoformat_ist(self.updated_at),
         }
 
 
@@ -47,8 +47,8 @@ class AdminWallet(db.Model):
     total_distributed     = db.Column(db.Numeric(18, 2), default=0)
     total_returned        = db.Column(db.Numeric(18, 2), default=0)
     low_balance_threshold = db.Column(db.Numeric(18, 2), default=ADMIN_LOW_THRESHOLD)
-    updated_at            = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_at            = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at            = db.Column(db.DateTime, default=now_ist, onupdate=now_ist)
+    created_at            = db.Column(db.DateTime, default=now_ist)
 
     @property
     def available_balance(self):
@@ -90,7 +90,7 @@ class WalletTransaction(db.Model):
     balance_after     = db.Column(db.Numeric(18, 2))
     cash_wallet_after = db.Column(db.Numeric(18, 2))
     created_by        = db.Column(db.Integer, db.ForeignKey('users.id'))
-    created_at        = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at        = db.Column(db.DateTime, default=now_ist)
 
     branch = db.relationship('Branch', backref='transactions', lazy=True)
 
@@ -105,5 +105,5 @@ class WalletTransaction(db.Model):
             'reference_id':      self.reference_id,
             'balance_after':     float(self.balance_after)     if self.balance_after     else 0,
             'cash_wallet_after': float(self.cash_wallet_after) if self.cash_wallet_after else 0,
-            'created_at':        self.created_at.isoformat() if self.created_at else None,
+            'created_at':        isoformat_ist(self.created_at),
         }

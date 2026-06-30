@@ -340,18 +340,20 @@ def approve_adviser(adviser_id):
         return jsonify(success_response({'id': adviser_id}, 'Adviser registration deleted')[0]), 200
 
     import secrets
-    from datetime import datetime
     from models.user import User
     from werkzeug.security import generate_password_hash
 
-    year = datetime.now().year
-    seq = User.query.count() + 1
-    username = f'DEFAD{year}{str(seq).zfill(2)}'
-    password = secrets.token_hex(5)
+    username = (adviser.adviser_code or '').strip().upper()
+    if not username:
+        return jsonify(error_response('Adviser ID is missing — cannot create login')[0]), 400
 
-    while User.query.filter_by(username=username).first():
-        seq += 1
-        username = f'DEFAD{year}{str(seq).zfill(2)}'
+    taken = User.query.filter(db.func.upper(User.username) == username).first()
+    if taken and taken.mobile != adviser.mobile:
+        return jsonify(error_response(
+            f'Login username {username} is already assigned to another user'
+        )[0]), 409
+
+    password = secrets.token_hex(5)
 
     branch_id = adviser.branch_id or claims.get('branch_id')
     _base_email = adviser.email or f'{username.lower()}@defoex.com'

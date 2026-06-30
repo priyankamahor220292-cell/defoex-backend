@@ -27,6 +27,7 @@ from models.adviser import Adviser
 from models.branch import Branch
 from models.user import User
 from utils.helpers import success_response, error_response, generate_investment_plan_id
+from utils.datetime_utils import now_ist, today_ist, isoformat_ist
 from utils.role_scoping import sanitize_response, current_role, should_hide_branch
 from utils.member_lookup import (
     resolve_member_from_code,
@@ -309,7 +310,7 @@ def create_mis_plan():
             return jsonify({'success': False, 'message': err}), 400
 
     # 5. Investment date
-    investment_date = date.today()
+    investment_date = today_ist()
     if data.get('investment_date'):
         try:
             investment_date = datetime.strptime(data['investment_date'], '%Y-%m-%d').date()
@@ -426,7 +427,7 @@ def create_sis_plan():
         if err:
             return jsonify({'success': False, 'message': err}), 400
 
-    investment_date = date.today()
+    investment_date = today_ist()
     if data.get('investment_date'):
         try:
             investment_date = datetime.strptime(data['investment_date'], '%Y-%m-%d').date()
@@ -553,7 +554,7 @@ def mis_contribution():
         if err:
             return jsonify({'success': False, 'message': err}), 400
 
-    payment_date = date.today()
+    payment_date = today_ist()
     if data.get('payment_date'):
         try:
             payment_date = datetime.strptime(data['payment_date'], '%Y-%m-%d').date()
@@ -661,14 +662,14 @@ def approve_investment(investment_id):
 
             investment.approval_status = 'Approved'
             investment.status = 'Active'
-            investment.approved_at = datetime.utcnow()
+            investment.approved_at = now_ist()
 
             first_inst = Installment.query.filter_by(
                 investment_id=investment.id, installment_number=1
             ).first()
             if first_inst:
                 first_inst.status = 'Paid'
-                first_inst.paid_date = date.today()
+                first_inst.paid_date = today_ist()
             investment.installments_paid = 1
 
             msg = (
@@ -801,7 +802,7 @@ def list_investments():
 
 def _fmt_receipt_date(d):
     if not d:
-        return date.today().strftime('%d %B %Y').lstrip('0')
+        return today_ist().strftime('%d %B %Y').lstrip('0')
     if isinstance(d, str):
         try:
             d = datetime.strptime(d[:10], '%Y-%m-%d').date()
@@ -875,7 +876,7 @@ def investment_receipt(irn):
         investment_id=investment.id, status='Paid'
     ).order_by(Installment.installment_number.desc()).first()
 
-    receipt_date = last_paid.paid_date if last_paid and last_paid.paid_date else date.today()
+    receipt_date = last_paid.paid_date if last_paid and last_paid.paid_date else today_ist()
     payment_mode = (last_paid.payment_mode if last_paid and last_paid.payment_mode
                     else investment.payment_mode or 'Cash')
 
@@ -894,7 +895,7 @@ def investment_receipt(irn):
             'mobile': member.mobile,
             'plan_name': _receipt_plan_label(investment),
             'plan_type': investment.plan_type,
-            'investment_term': 'Monthly',
+            'investment_term': 'Single' if is_sis else 'Monthly',
             'status_label': f'{paid} out of {total}' if total else f'{paid} out of 0',
             'final_investment': int(monthly),
             'late_fee': 0,
@@ -903,6 +904,9 @@ def investment_receipt(irn):
             'return_of_investment': roi_amount,
             'payment_mode': (payment_mode or 'Cash').upper(),
             'remarks': (
+                'Received with thanks towards the single lump-sum investment '
+                'under the selected SIS plan.'
+                if is_sis else
                 'Received with thanks towards the monthly investment installment '
                 'under the selected investment plan.'
             ),
@@ -914,6 +918,6 @@ def investment_receipt(irn):
                 'mobile': member.mobile,
             },
             'investment': investment.to_dict(),
-            'printed_at': datetime.utcnow().isoformat(),
+            'printed_at': isoformat_ist(now_ist()),
         }
     }), 200

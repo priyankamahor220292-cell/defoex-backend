@@ -1,22 +1,17 @@
 """Approve investor registration and generate DEFIN login credentials."""
 
-import secrets
 from datetime import datetime
 
 from extensions import db
+from utils.datetime_utils import now_ist, isoformat_ist
 from models.user import User
 from models.adviser import Adviser
 from utils.branch_wallet_ops import deduct_branch_wallet
 
 
-def _unique_defin_username():
-    year = datetime.utcnow().year
-    seq = User.query.count() + 1
-    username = f'DEFIN{year}{str(seq).zfill(2)}'
-    while User.query.filter_by(username=username).first():
-        seq += 1
-        username = f'DEFIN{year}{str(seq).zfill(2)}'
-    return username
+def _investor_username(member):
+    """Login username matches investor ID (e.g. DEFIN202634)."""
+    return (member.investor_id or '').strip().upper()
 
 
 def _deduct_member_fee(member, approved_by_id):
@@ -59,9 +54,18 @@ def finalize_investor_registration(member, approved_by_id):
 
     existing_user = User.query.filter_by(mobile=member.mobile).first()
     if existing_user:
+        username = _investor_username(member)
+        if username and existing_user.username.upper() != username:
+            taken = User.query.filter(
+                db.func.upper(User.username) == username
+            ).filter(User.id != existing_user.id).first()
+            if taken:
+                return None, f'Login username {username} is already assigned to another user'
+            existing_user.username = username
+
         member.approval_status = 'Approved'
         member.approved_by = int(approved_by_id) if approved_by_id else None
-        member.approved_at = datetime.utcnow()
+        member.approved_at = now_ist()
         fee_result, wallet_err = _deduct_member_fee(member, approved_by_id)
         if wallet_err:
             db.session.rollback()
@@ -73,10 +77,19 @@ def finalize_investor_registration(member, approved_by_id):
             'password': None,
             'already_has_user': True,
             'wallet': fee_result,
-            'message': f'Approved — existing login: {existing_user.username}',
+            'message': f'Approved — login username: {existing_user.username}',
         }, None
 
-    username = _unique_defin_username()
+    username = _investor_username(member)
+    if not username:
+        return None, 'Investor ID is missing — cannot create login'
+
+    taken = User.query.filter(
+        db.func.upper(User.username) == username
+    ).first()
+    if taken and taken.mobile != member.mobile:
+        return None, f'Login username {username} is already assigned to another user'
+
     password = secrets.token_hex(5)
     email = member.email or f'{username.lower()}@defoex.com'
     if User.query.filter_by(email=email).first():
@@ -95,7 +108,7 @@ def finalize_investor_registration(member, approved_by_id):
 
     member.approval_status = 'Approved'
     member.approved_by = int(approved_by_id) if approved_by_id else None
-    member.approved_at = datetime.utcnow()
+    member.approved_at = now_ist()
 
     db.session.add(inv_user)
     db.session.flush()

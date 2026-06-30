@@ -11,6 +11,7 @@ from utils.helpers import (
 )
 from utils.role_scoping import scope_members, current_role, current_adviser, sanitize_response
 from datetime import datetime, date
+from utils.datetime_utils import today_ist
 import traceback
 
 registration_bp = Blueprint('registration', __name__, url_prefix='/api/registration')
@@ -85,10 +86,46 @@ def new_registration():
     branch_id = claims.get('branch_id')
     data      = request.get_json() or {}
 
-    required = ['adviser_code', 'full_name', 'mobile', 'aadhar_number']
-    missing  = [f for f in required if not data.get(f)]
+    required = [
+        'adviser_code', 'full_name', 'father_spouse_name', 'date_of_birth', 'email',
+        'mobile', 'aadhar_number', 'corr_address', 'corr_city', 'corr_state',
+        'corr_pincode', 'nominee_name', 'nominee_relationship', 'nominee_age',
+    ]
+    field_labels = {
+        'adviser_code': 'Adviser code',
+        'full_name': 'Full name',
+        'father_spouse_name': 'Father / Spouse name',
+        'date_of_birth': 'Date of birth',
+        'email': 'Email',
+        'mobile': 'Mobile',
+        'aadhar_number': 'Aadhar number',
+        'corr_address': 'Address',
+        'corr_city': 'City',
+        'corr_state': 'State',
+        'corr_pincode': 'Pincode',
+        'nominee_name': 'Nominee name',
+        'nominee_relationship': 'Nominee relationship',
+        'nominee_age': 'Nominee age',
+    }
+    missing = [field_labels[f] for f in required if not str(data.get(f) or '').strip()]
     if missing:
         return jsonify(error_response(f"Missing required fields: {', '.join(missing)}")[0]), 400
+
+    email = str(data.get('email') or '').strip().lower()
+    if '@' not in email or '.' not in email.split('@')[-1]:
+        return jsonify(error_response('Valid email address is required')[0]), 400
+
+    pincode = str(data.get('corr_pincode') or '').strip()
+    if not pincode.isdigit() or len(pincode) != 6:
+        return jsonify(error_response('Valid 6-digit pincode is required')[0]), 400
+
+    aadhar = str(data.get('aadhar_number') or '').strip()
+    if not aadhar.isdigit() or len(aadhar) != 12:
+        return jsonify(error_response('Valid 12-digit Aadhar number is required')[0]), 400
+
+    nominee_age_raw = data.get('nominee_age')
+    if nominee_age_raw is None or str(nominee_age_raw).strip() == '':
+        return jsonify(error_response('Nominee age is required')[0]), 400
 
     mobile = normalize_mobile(data.get('mobile'))
     if not mobile or len(mobile) != 10:
@@ -110,8 +147,12 @@ def new_registration():
         branch_id = adviser.branch_id
 
     dob = safe_date(data.get('date_of_birth'))
+    if not dob:
+        return jsonify(error_response('Valid date of birth is required')[0]), 400
     age = calculate_age(dob) if dob else None
     nominee_age = safe_decimal(data.get('nominee_age'))
+    if nominee_age is None or nominee_age < 0:
+        return jsonify(error_response('Valid nominee age is required')[0]), 400
 
     investor_id = generate_investor_id()
 
@@ -129,7 +170,7 @@ def new_registration():
             mobile           = mobile,
             phone_office     = data.get('phone_office') or None,
             phone_residence  = data.get('phone_residence') or None,
-            email            = data.get('email') or None,
+            email            = email,
             is_senior_citizen= bool(data.get('is_senior_citizen', False)),
             is_special_roi   = bool(data.get('is_special_roi', False)),
             corr_address     = data.get('corr_address') or None,
@@ -173,26 +214,18 @@ def new_registration():
             cheque_dd_date   = safe_date(data.get('cheque_dd_date')),
             reg_bank_name    = data.get('reg_bank_name') or None,
             company_account  = data.get('company_account') or None,
-            date_of_joining  = safe_date(data.get('date_of_joining')) or date.today(),
+            date_of_joining  = safe_date(data.get('date_of_joining')) or today_ist(),
             branch_id        = branch_id,
             approval_status  = 'Pending',
         )
         db.session.add(member)
-        db.session.flush()
-
-        # Auto-approve + generate DEFIN username/password on successful create
-        from utils.investor_credentials import finalize_investor_registration
-        identity = get_jwt_identity()
-        creds, finalize_err = finalize_investor_registration(member, identity)
-        if finalize_err:
-            db.session.rollback()
-            return jsonify(error_response(finalize_err)[0]), 400
+        db.session.commit()
 
         resp = member.to_dict()
-        resp['credentials'] = creds
-        msg = f'Investor created — ID: {investor_id}'
-        if creds.get('password'):
-            msg += f' — Username: {creds["username"]}'
+        msg = (
+            f'Investor registration submitted — ID: {investor_id}. '
+            'Pending branch manager approval.'
+        )
         return jsonify(success_response(resp, msg)[0]), 201
 
     except Exception as e:
@@ -213,7 +246,19 @@ def approve_registration(member_id):
     action = data.get('action')
     member = Member.query.get_or_404(member_id)
 
+    role = claims.get('role')
+    branch_id = claims.get('branch_id')
+    if role == 'branchmanager':
+        if not branch_id:
+            return jsonify(error_response('Branch not assigned', 403)[0]), 403
+        if member.branch_id != branch_id:
+            return jsonify(error_response('Investor not in your branch', 403)[0]), 403
+
     if action == 'approve':
+        if (member.approval_status or '').lower() != 'pending':
+            return jsonify(error_response(
+                f'Investor is already {member.approval_status or "processed"}'
+            )[0]), 400
         from utils.investor_credentials import finalize_investor_registration
         creds, err = finalize_investor_registration(member, identity)
         if err:
@@ -222,6 +267,10 @@ def approve_registration(member_id):
         if creds.get('password'):
             msg += f' — Username: {creds["username"]}'
     elif action == 'reject':
+        if (member.approval_status or '').lower() != 'pending':
+            return jsonify(error_response(
+                f'Cannot reject — status is {member.approval_status or "unknown"}'
+            )[0]), 400
         member.approval_status = 'Rejected'
         db.session.commit()
         msg = f'Registration rejected for {member.full_name}'

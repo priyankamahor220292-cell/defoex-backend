@@ -8,15 +8,16 @@ ID Formats:
                      9-SISINV202601  (branch_id-SISINV + year + 2-digit seq)
 """
 
-from datetime import date, datetime
+from datetime import date
 import re
 from extensions import db
+from utils.datetime_utils import now_ist, today_ist
 
 
 # ── Investor ID: DEFIN202601 ──────────────────────────────────────────────────
 def generate_investor_id():
     from models.member import Member
-    year   = datetime.now().year
+    year   = now_ist().year
     prefix = f'DEFIN{year}'
     existing = Member.query.filter(Member.investor_id.like(f'{prefix}%')).count()
     seq = existing + 1
@@ -30,7 +31,7 @@ def generate_investor_id():
 # ── Adviser ID: DEFAD202601 ───────────────────────────────────────────────────
 def generate_adviser_code():
     from models.adviser import Adviser
-    year   = datetime.now().year
+    year   = now_ist().year
     prefix = f'DEFAD{year}'
     existing = Adviser.query.filter(Adviser.adviser_code.like(f'{prefix}%')).count()
     seq = existing + 1
@@ -54,7 +55,7 @@ def generate_investment_plan_id(branch_id, plan_type):
     if plan not in ('MIS', 'SIS'):
         plan = 'MIS'
 
-    year = datetime.now().year
+    year = now_ist().year
     branch = int(branch_id) if branch_id is not None else 0
     prefix = f'{branch}-{plan}INV{year}'
 
@@ -71,7 +72,7 @@ def generate_irn(branch_id=None, plan_type='MIS'):
     """Backward-compatible alias — prefer generate_investment_plan_id."""
     if branch_id is None:
         from models.investment import Investment
-        year = datetime.now().year
+        year = now_ist().year
         prefix = f'INV{year}'
         existing = Investment.query.filter(Investment.irn.like(f'{prefix}%')).count()
         seq = existing + 1
@@ -115,7 +116,7 @@ def find_adviser_by_mobile(mobile):
 def calculate_age(dob):
     if not dob:
         return None
-    today = date.today()
+    today = today_ist()
     age = today.year - dob.year
     if (today.month, today.day) < (dob.month, dob.day):
         age -= 1

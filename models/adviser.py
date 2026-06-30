@@ -1,6 +1,6 @@
 from extensions import db
-from datetime import datetime
 import json
+from utils.datetime_utils import now_ist, isoformat_ist
 
 RANKS = {
     1: 'SR',   # Senior Representative
@@ -42,7 +42,7 @@ class Adviser(db.Model):
     is_blacklisted   = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     registration_data = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_ist)
 
     branch = db.relationship('Branch', backref='advisers', lazy=True)
 
@@ -111,6 +111,6 @@ class Adviser(db.Model):
             'status': status,
             'investor_count': investor_count,
             'date_of_joining': doj,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'created_at': isoformat_ist(self.created_at),
             'registration': reg,
         }

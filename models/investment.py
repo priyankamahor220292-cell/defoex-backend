@@ -1,7 +1,8 @@
 from extensions import db
-from datetime import datetime, date
+from datetime import date
 from dateutil.relativedelta import relativedelta
 from decimal import Decimal, ROUND_HALF_UP
+from utils.datetime_utils import now_ist, today_ist, isoformat_ist
 
 # MIS Plan Definitions — from official rate chart
 # Formula: maturity = monthly × months × (roi_num / roi_den)
@@ -50,7 +51,7 @@ class Investment(db.Model):
     plan_tenure     = db.Column(db.Enum('3Y', '5Y', '7Y', name='plan_tenure_enum'), nullable=False)
     plan_name       = db.Column(db.String(60))
 
-    investment_date = db.Column(db.Date, default=date.today)
+    investment_date = db.Column(db.Date, default=today_ist)
     due_date        = db.Column(db.Date)
     maturity_date   = db.Column(db.Date)
 
@@ -73,8 +74,8 @@ class Investment(db.Model):
     approved_at     = db.Column(db.DateTime, nullable=True)
 
     status          = db.Column(db.Enum('Active', 'Completed', 'Cancelled', name='inv_status_enum'), default='Active')
-    created_at      = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at      = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at      = db.Column(db.DateTime, default=now_ist)
+    updated_at      = db.Column(db.DateTime, default=now_ist, onupdate=now_ist)
 
     branch       = db.relationship('Branch', backref='investments', lazy=True)
     installments = db.relationship('Installment', backref='investment', lazy=True)
@@ -140,7 +141,7 @@ class Investment(db.Model):
             'adviser_code':            self.adviser_code,
             'approval_status':         self.approval_status,
             'status':                  self.status,
-            'created_at':              self.created_at.isoformat() if self.created_at else None,
+            'created_at':              isoformat_ist(self.created_at),
         }
 
 
@@ -156,7 +157,7 @@ class Installment(db.Model):
     amount             = db.Column(db.Numeric(12, 2))
     payment_mode       = db.Column(db.String(20))
     status             = db.Column(db.Enum('Pending', 'Paid', 'Overdue', name='installment_status_enum'), default='Pending')
-    created_at         = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at         = db.Column(db.DateTime, default=now_ist)
 
     def to_dict(self):
         return {

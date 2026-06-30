@@ -1,5 +1,5 @@
 from extensions import db
-from datetime import datetime
+from utils.datetime_utils import now_ist, isoformat_ist
 
 # Commission rates from the chart
 MIS_COMMISSION_RATES = {
@@ -62,7 +62,7 @@ class Commission(db.Model):
     commission_amount = db.Column(db.Numeric(15, 2))
     status = db.Column(db.String(20), default='Pending')
     paid_at = db.Column(db.DateTime)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_ist)
 
     def to_dict(self):
         ctype = getattr(self, 'commission_type', None) or 'Direct'
@@ -83,6 +83,6 @@ class Commission(db.Model):
             'commission_type': ctype,
             'benefit_type': display_type,
             'status': self.status,
-            'paid_at': self.paid_at.isoformat() if self.paid_at else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'paid_at': isoformat_ist(self.paid_at),
+            'created_at': isoformat_ist(self.created_at),
         }

@@ -10,6 +10,7 @@ from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import func, false
 import traceback
+from utils.datetime_utils import today_ist
 
 reports_v4_bp = Blueprint('reports_v4', __name__, url_prefix='/api/reports')
 
@@ -55,7 +56,7 @@ def dashboard_stats():
         role      = claims.get('role')
         branch_id = claims.get('branch_id')
 
-        today            = date.today()
+        today            = today_ist()
         this_month_start = today.replace(day=1)
 
         # Base queries
@@ -133,7 +134,7 @@ def business_summary():
             adviser_code = adviser.adviser_code if adviser else None
             branch_id = None
 
-        today = date.today()
+        today = today_ist()
         periods = {
             '1_month':  (today - relativedelta(months=1),  today),
             '3_months': (today - relativedelta(months=3),  today),
