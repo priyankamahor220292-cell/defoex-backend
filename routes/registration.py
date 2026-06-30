@@ -10,6 +10,7 @@ from utils.helpers import (
     normalize_mobile, find_member_by_mobile,
 )
 from utils.role_scoping import scope_members, current_role, current_adviser, sanitize_response
+from utils.member_lookup import find_promoter_adviser
 from datetime import datetime, date
 from utils.datetime_utils import today_ist
 import traceback
@@ -51,7 +52,6 @@ def check_adviser():
     if not code:
         return jsonify(error_response('Please enter an adviser code')[0]), 400
 
-    from utils.member_lookup import find_promoter_adviser
     from utils.rank_helpers import allowed_ranks_for_promoter, rank_label
 
     adviser, err = find_promoter_adviser(code)
@@ -139,9 +139,10 @@ def new_registration():
     if data.get('aadhar_number') and Member.query.filter_by(aadhar_number=str(data['aadhar_number'])).first():
         return jsonify(error_response('Aadhar number already registered')[0]), 409
 
-    adviser = Adviser.query.filter_by(adviser_code=data['adviser_code'], is_active=True).first()
-    if not adviser:
-        return jsonify(error_response('Invalid Adviser Code')[0]), 400
+    adviser_code_input = str(data.get('adviser_code') or '').strip()
+    adviser, adviser_err = find_promoter_adviser(adviser_code_input)
+    if adviser_err or not adviser:
+        return jsonify(error_response(adviser_err or 'Invalid Adviser Code')[0]), 400
 
     if not branch_id and adviser.branch_id:
         branch_id = adviser.branch_id
@@ -204,7 +205,7 @@ def new_registration():
             professional_details = data.get('professional_details') or None,
             annual_income    = safe_decimal(data.get('annual_income')),
             family_income    = safe_decimal(data.get('family_income')),
-            adviser_code     = str(data['adviser_code']).strip(),
+            adviser_code     = adviser.adviser_code,
             promoter_post    = data.get('promoter_post') or None,
             member_type      = safe_enum(data.get('member_type', 'Investor'), ['Investor','Customer','Promoter Member'], 'Investor'),
             member_fees      = safe_decimal(data.get('member_fees')) or 10,

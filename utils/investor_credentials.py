@@ -6,6 +6,7 @@ from extensions import db
 from utils.datetime_utils import now_ist
 from models.user import User
 from models.adviser import Adviser
+from utils.member_lookup import find_adviser_by_code_or_login
 from utils.branch_wallet_ops import deduct_branch_wallet
 from sqlalchemy.exc import IntegrityError
 
@@ -21,7 +22,7 @@ def _resolve_member_branch(member):
         return member.branch_id
     if not member.adviser_code:
         return None
-    adv = Adviser.query.filter_by(adviser_code=member.adviser_code).first()
+    adv = find_adviser_by_code_or_login(member.adviser_code)
     if adv and adv.branch_id:
         member.branch_id = adv.branch_id
         return adv.branch_id
