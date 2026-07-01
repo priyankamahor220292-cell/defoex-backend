@@ -25,6 +25,7 @@ from models.investment import Investment, Installment, MIS_PLANS, SIS_PLANS
 from models.member import Member
 from models.adviser import Adviser
 from models.branch import Branch
+from models.branch_wallet import BranchWallet
 from models.user import User
 from utils.helpers import success_response, error_response, generate_investment_plan_id
 from utils.datetime_utils import now_ist, today_ist, isoformat_ist
@@ -151,8 +152,34 @@ def _investor_id_for_user(user):
     return None
 
 
+def _enrich_investment_items(investments):
+    """Attach branch name and wallet balance for each investment (approval UI)."""
+    branch_ids = {inv.branch_id for inv in investments if inv.branch_id}
+    if not branch_ids:
+        return [inv.to_dict() for inv in investments]
+
+    branches = {
+        b.id: b for b in Branch.query.filter(Branch.id.in_(branch_ids)).all()
+    }
+    wallets = {
+        w.branch_id: w
+        for w in BranchWallet.query.filter(BranchWallet.branch_id.in_(branch_ids)).all()
+    }
+
+    items = []
+    for inv in investments:
+        d = inv.to_dict()
+        branch = branches.get(inv.branch_id)
+        wallet = wallets.get(inv.branch_id)
+        d['branch_name'] = branch.branch_name if branch else None
+        d['branch_code'] = branch.branch_code if branch else None
+        d['branch_current_balance'] = float(wallet.current_balance or 0) if wallet else 0
+        items.append(d)
+    return items
+
+
 def _deduct_investment_payment(investment, amount, created_by=None, note=''):
-    """Deduct plan payment from branch limit → add to cash wallet."""
+    """Deduct plan payment from branch current balance → add to cash wallet."""
     desc = (
         f'{investment.plan_type} plan — {investment.investor_id} '
         f'({investment.irn}){note}'
@@ -632,7 +659,7 @@ def mis_contribution():
             'success': True,
             'message': (
                 f'Installment #{next_inst_no} recorded. '
-                f'₹{float(amount):,.0f} deducted from branch limit → cash wallet.'
+                f'₹{float(amount):,.0f} deducted from branch current balance → cash wallet.'
             ),
             'data': {
                 'installment_no':   next_inst_no,
@@ -657,8 +684,8 @@ def approve_investment(investment_id):
     """
     Approve or reject a pending investment plan.
 
-    On approve: deduct plan amount from branch limit → cash wallet (if not already
-    deducted at create time), then mark approved.
+    On approve: deduct plan amount from branch current balance → cash wallet (if not
+    already deducted at create time), then mark approved.
     """
     denied = _require_plan_admin()
     if denied:
@@ -717,7 +744,7 @@ def approve_investment(investment_id):
 
             msg = (
                 f'Investment plan approved. '
-                f'₹{deduct_amount:,.0f} deducted from branch limit → cash wallet.'
+                f'₹{deduct_amount:,.0f} deducted from branch current balance → cash wallet.'
             )
             if commissions:
                 msg += f' {len(commissions)} benefit record(s) created.'
@@ -829,7 +856,7 @@ def list_investments():
     q = q.order_by(Investment.created_at.desc())
     paginated = q.paginate(page=page, per_page=per_page, error_out=False)
 
-    items = [inv.to_dict() for inv in paginated.items]
+    items = _enrich_investment_items(paginated.items)
     if should_hide_branch(current_role()):
         items = sanitize_response(items)
 
