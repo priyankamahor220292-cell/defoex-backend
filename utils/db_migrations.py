@@ -143,3 +143,30 @@ def backfill_adviser_login_usernames(db):
     except Exception as e:
         db.session.rollback()
         print(f"  NOTE adviser login_username backfill: {e}")
+
+
+def ensure_approval_timestamp_columns(db):
+    """Add approved_at / approved_by on members and investments if missing."""
+    specs = [
+        ('members', 'approved_at', 'TIMESTAMP'),
+        ('members', 'approved_by', 'INTEGER'),
+        ('investments', 'approved_at', 'TIMESTAMP'),
+        ('investments', 'approved_by', 'INTEGER'),
+    ]
+    try:
+        insp = inspect(db.engine)
+        for table, column, col_type in specs:
+            try:
+                cols = [c['name'] for c in insp.get_columns(table)]
+            except Exception:
+                continue
+            if column in cols:
+                continue
+            with db.engine.connect() as conn:
+                conn.execute(text(
+                    f'ALTER TABLE {table} ADD COLUMN {column} {col_type}'
+                ))
+                conn.commit()
+            print(f'  OK   Added {table}.{column}')
+    except Exception as e:
+        print(f'  NOTE approval timestamp migration: {e}')

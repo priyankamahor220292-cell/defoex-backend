@@ -1,6 +1,7 @@
 """Branch wallet deductions: panel limit (current_balance) ↓, cash_wallet ↑."""
 
 from extensions import db
+from utils.datetime_utils import now_ist
 from models.branch_wallet import BranchWallet, WalletTransaction
 
 
@@ -69,6 +70,7 @@ def deduct_branch_wallet(branch_id, amount, description, reference_id=None, crea
         balance_after=wallet.current_balance,
         cash_wallet_after=wallet.cash_wallet,
         created_by=int(created_by) if created_by else None,
+        created_at=now_ist(),
     )
     db.session.add(txn)
 
@@ -124,6 +126,7 @@ def refund_branch_wallet(branch_id, amount, description, reference_id=None, crea
         balance_after=wallet.current_balance,
         cash_wallet_after=wallet.cash_wallet,
         created_by=int(created_by) if created_by else None,
+        created_at=now_ist(),
     )
     db.session.add(txn)
 

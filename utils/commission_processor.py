@@ -7,6 +7,7 @@ Uses raw SQL to avoid PostgreSQL Enum type issues.
 from utils.commission_engine import calculate_all_commissions, calc_company_flat_commission
 from models.adviser import Adviser
 from extensions import db
+from utils.datetime_utils import now_ist
 from sqlalchemy import text
 import traceback
 
@@ -36,6 +37,17 @@ def build_adviser_chain(adviser_code, max_depth=20):
 
 def process_investment_commissions(investment):
     try:
+        inv_id = getattr(investment, 'id', None)
+        if not inv_id:
+            return []
+
+        existing = db.session.execute(
+            text('SELECT COUNT(*) FROM commissions WHERE investment_id = :iid'),
+            {'iid': inv_id},
+        ).scalar()
+        if existing and int(existing) > 0:
+            return []
+
         adviser_code = getattr(investment, 'adviser_code', None)
         if not adviser_code:
             return []
@@ -76,11 +88,11 @@ def process_investment_commissions(investment):
                     })
 
         saved   = []
+        created_at = now_ist()
 
         for r in records:
             if r['commission_amount'] <= 0:
                 continue
-            inv_id = getattr(investment, 'id', None)
             try:
                 # Use raw SQL — avoids commission_status_enum entirely
                 db.session.execute(text("""
@@ -93,7 +105,7 @@ def process_investment_commissions(investment):
                     (:iid, :acode, :arank,
                      :ptype, :ptenure, :iamt,
                      :crate, :camt,
-                     :ctype, 'Pending', NOW())
+                     :ctype, 'Pending', :created_at)
                 """), {
                     'iid':    inv_id,
                     'acode':  r['adviser_code'],
@@ -104,6 +116,7 @@ def process_investment_commissions(investment):
                     'crate':  r['commission_rate'],
                     'camt':   r['commission_amount'],
                     'ctype':  r['commission_type'],
+                    'created_at': created_at,
                 })
                 saved.append(r)
                 print(f"  Commission: {r['adviser_code']} ({r['adviser_rank']}) "
@@ -133,7 +146,7 @@ def process_investment_commissions(investment):
                         (:iid, :acode, :arank,
                          :ptype, :ptenure, :iamt,
                          :crate, :camt,
-                         :ctype, 'Pending', NOW())
+                         :ctype, 'Pending', :created_at)
                     """), {
                         'iid':    inv_id,
                         'acode':  r['adviser_code'],
@@ -144,6 +157,7 @@ def process_investment_commissions(investment):
                         'crate':  r['commission_rate'],
                         'camt':   r['commission_amount'],
                         'ctype':  r['commission_type'],
+                        'created_at': created_at,
                     })
                     saved.append(r)
                     print(f"  Commission retry OK: {r['adviser_code']}")
