@@ -36,6 +36,7 @@ from utils.member_lookup import (
     find_member_for_adviser,
 )
 from utils.branch_wallet_ops import deduct_branch_wallet, refund_branch_wallet
+from utils.commission_processor import process_investment_commissions
 
 investment_plan_bp = Blueprint('investment_plan', __name__, url_prefix='/api/investment-plans')
 
@@ -673,6 +674,14 @@ def approve_investment(investment_id):
     if not investment:
         return jsonify({'success': False, 'message': 'Investment not found'}), 404
 
+    role = (get_jwt() or {}).get('role', '').lower()
+    if role == 'branchmanager':
+        branch, err = _get_current_branch()
+        if err:
+            return jsonify({'success': False, 'message': err}), 400
+        if investment.branch_id != branch.id:
+            return jsonify({'success': False, 'message': 'Investment not in your branch'}), 403
+
     if investment.approval_status != 'Pending':
         return jsonify({'success': False,
                         'message': f'Investment is already {investment.approval_status}'}), 400
@@ -691,6 +700,10 @@ def approve_investment(investment_id):
             investment.approval_status = 'Approved'
             investment.status = 'Active'
             investment.approved_at = now_ist()
+            try:
+                investment.approved_by = int(identity)
+            except (TypeError, ValueError):
+                pass
 
             first_inst = Installment.query.filter_by(
                 investment_id=investment.id, installment_number=1
@@ -700,10 +713,14 @@ def approve_investment(investment_id):
                 first_inst.paid_date = today_ist()
             investment.installments_paid = 1
 
+            commissions = process_investment_commissions(investment)
+
             msg = (
                 f'Investment plan approved. '
                 f'₹{deduct_amount:,.0f} deducted from branch limit → cash wallet.'
             )
+            if commissions:
+                msg += f' {len(commissions)} benefit record(s) created.'
         else:
             deduct_amount = float(investment.monthly_amount or 0)
             wallet_result, wallet_err = refund_branch_wallet(

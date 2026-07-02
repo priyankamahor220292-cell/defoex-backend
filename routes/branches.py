@@ -4,6 +4,7 @@ from models.branch import Branch
 from models.branch_wallet import BranchWallet, WalletTransaction, AdminWallet, ADMIN_WALLET_LIMIT
 from extensions import db
 from utils.helpers import success_response, error_response
+from utils.datetime_utils import now_ist, isoformat_ist
 from utils.role_scoping import branch_access_error, should_hide_branch
 from sqlalchemy import text
 import traceback
@@ -193,7 +194,6 @@ def admin_wallet_status():
 @branches_bp.route('/<int:branch_id>/topup', methods=['POST'])
 @jwt_required()
 def topup_branch_wallet(branch_id):
-    from sqlalchemy import text as st
     claims = get_jwt()
     if claims.get('role') != 'superadmin':
         return jsonify(error_response('Unauthorized', 403)[0]), 403
@@ -236,24 +236,29 @@ def topup_branch_wallet(branch_id):
 
     # Update admin wallet — use correct column: total_distributed
     aw.total_distributed = float(aw.total_distributed or 0) + amount
+    aw.updated_at = now_ist()
 
     # Update branch wallet
     bw.current_balance = float(bw.current_balance or 0) + amount
+    bw.updated_at = now_ist()
 
-    # Log transaction
+    identity = get_jwt_identity()
     try:
-        db.session.execute(st("""
-            INSERT INTO wallet_transactions
-                (branch_id, transaction_type, amount, description,
-                 balance_after, cash_wallet_after, created_at)
-            VALUES (:bid, 'TopUp', :amt, :desc, :bal, :cash, NOW())
-        """), {
-            'bid': branch_id, 'amt': amount, 'desc': desc,
-            'bal': float(bw.current_balance),
-            'cash': float(bw.cash_wallet or 0),
-        })
-    except Exception as e:
-        print(f"Txn log error: {e}")
+        created_by = int(identity)
+    except (TypeError, ValueError):
+        created_by = None
+
+    txn = WalletTransaction(
+        branch_id=int(branch_id),
+        transaction_type='TopUp',
+        amount=amount,
+        description=desc,
+        balance_after=float(bw.current_balance),
+        cash_wallet_after=float(bw.cash_wallet or 0),
+        created_by=created_by,
+        created_at=now_ist(),
+    )
+    db.session.add(txn)
 
     db.session.commit()
 
@@ -263,6 +268,8 @@ def topup_branch_wallet(branch_id):
         'amount_added':   amount,
         'branch_balance': float(bw.current_balance),
         'admin_balance':  new_avail,
+        'transaction':    txn.to_dict(),
+        'topup_at':       isoformat_ist(txn.created_at),
     }, f'₹{amount:,.0f} sent to {branch.branch_name}')[0]), 200
 
 @branches_bp.route('/<int:branch_id>/wallet-history', methods=['GET'])
