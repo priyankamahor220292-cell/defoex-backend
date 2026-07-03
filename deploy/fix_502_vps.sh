@@ -186,15 +186,38 @@ done
 if [ -n "$FRONTEND_DIR" ] && command -v npm >/dev/null 2>&1; then
   echo "=== 6. Frontend build → /var/www/defoex ==="
   cd "$FRONTEND_DIR"
-  git pull origin main 2>/dev/null || true
+  if [ -d .git ]; then
+    git fetch origin main
+    git reset --hard origin/main
+  fi
   [ -f .env.production ] && cp .env.production .env
   npm ci --silent 2>/dev/null || npm install --silent
   npm run build
   sudo mkdir -p /var/www/defoex
   sudo rm -rf /var/www/defoex/*
   sudo cp -r build/* /var/www/defoex/
-  echo "Frontend deployed"
+  echo "Frontend deployed from $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 fi
+
+# ── 7. Verify DEFAD migration ────────────────────────────────────
+echo "=== 7. Verify company owner adviser (DEFAD202601) ==="
+python3 - <<'PY' || true
+import os, sys
+sys.path.insert(0, os.getcwd())
+from dotenv import load_dotenv
+load_dotenv()
+from app import create_app
+from models.adviser import Adviser
+app = create_app()
+with app.app_context():
+    owner = Adviser.query.filter_by(is_company_owner=True).first()
+    if owner:
+        print(f"  OK   Company owner: {owner.adviser_code}")
+        if str(owner.adviser_code).upper().startswith('DFX-'):
+            print("  WARN Still legacy DFX code — restart defoex again")
+    else:
+        print("  WARN No company owner adviser in DB")
+PY
 
 echo ""
 echo "✅ Done — login at http://188.208.141.253/login"
