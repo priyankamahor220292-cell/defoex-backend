@@ -122,6 +122,7 @@ User=${RUN_USER}
 Group=${RUN_USER}
 WorkingDirectory=${BACKEND_DIR}
 Environment="PATH=${VENV_BIN}"
+EnvironmentFile=-${BACKEND_DIR}/.env
 ExecStart=${VENV_BIN}/gunicorn -w 4 -b 127.0.0.1:8000 wsgi:app
 Restart=always
 RestartSec=3
