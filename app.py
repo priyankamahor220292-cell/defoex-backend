@@ -79,6 +79,7 @@ def create_app():
                 ensure_adviser_login_username_column,
                 ensure_adviser_registration_data_column,
                 ensure_approval_timestamp_columns,
+                migrate_legacy_dfx_to_def_ids,
                 backfill_adviser_investor_links,
                 backfill_adviser_login_usernames,
             )
@@ -87,6 +88,7 @@ def create_app():
             ensure_adviser_login_username_column(db)
             ensure_adviser_registration_data_column(db)
             ensure_approval_timestamp_columns(db)
+            migrate_legacy_dfx_to_def_ids(db)
             backfill_adviser_investor_links(db)
             backfill_adviser_login_usernames(db)
 

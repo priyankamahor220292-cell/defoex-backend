@@ -52,7 +52,8 @@ def seed_database():
         db.session.add(admin)
 
     # Company owner adviser — DEFAD{year}{seq}, e.g. DEFAD202601
-    if not Adviser.query.filter_by(is_company_owner=True).first():
+    owner = Adviser.query.filter_by(is_company_owner=True).first()
+    if not owner:
         owner_code = generate_adviser_code()
         owner = Adviser(
             adviser_code     = owner_code,
@@ -64,6 +65,11 @@ def seed_database():
             is_active        = True,
         )
         db.session.add(owner)
+    elif owner.adviser_code and str(owner.adviser_code).upper().startswith('DFX-'):
+        from utils.db_migrations import migrate_legacy_dfx_to_def_ids
+        db.session.commit()
+        migrate_legacy_dfx_to_def_ids(db)
+        owner = Adviser.query.filter_by(is_company_owner=True).first()
 
     db.session.commit()
     owner = Adviser.query.filter_by(is_company_owner=True).first()

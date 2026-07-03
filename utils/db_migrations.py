@@ -1,6 +1,159 @@
 """Lightweight startup migrations for production-safe schema updates."""
 
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, or_, text
+
+
+def _is_legacy_dfx_code(code):
+    """True for old DFX-* adviser/investor IDs (not IRN bonds)."""
+    if not code:
+        return False
+    c = str(code).strip().upper()
+    if c.startswith('DFX-IRN'):
+        return False
+    return c.startswith('DFX-')
+
+
+def _next_def_code(prefix, year, taken):
+    """Next available DEFIN/DEFAD code for the given year."""
+    seq = 1
+    while True:
+        candidate = f'{prefix}{year}{str(seq).zfill(2)}'
+        if candidate.upper() not in taken:
+            taken.add(candidate.upper())
+            return candidate
+        seq += 1
+
+
+def _rename_adviser_code(conn, old_code, new_code):
+    """Update adviser_code and all references after legacy → DEFAD migration."""
+    old_u, new_u = old_code.upper(), new_code.upper()
+    params = {'old': old_code, 'new': new_code, 'old_u': old_u, 'new_u': new_u}
+    conn.execute(text(
+        'UPDATE advisers SET adviser_code = :new WHERE adviser_code = :old'
+    ), params)
+    conn.execute(text(
+        'UPDATE advisers SET parent_adviser_code = :new WHERE parent_adviser_code = :old'
+    ), params)
+    conn.execute(text(
+        'UPDATE members SET adviser_code = :new WHERE adviser_code = :old'
+    ), params)
+    conn.execute(text(
+        'UPDATE investments SET adviser_code = :new WHERE adviser_code = :old'
+    ), params)
+    try:
+        conn.execute(text(
+            'UPDATE commissions SET adviser_code = :new WHERE adviser_code = :old'
+        ), params)
+    except Exception:
+        pass
+    conn.execute(text(
+        'UPDATE advisers SET login_username = :new_u '
+        'WHERE UPPER(login_username) = :old_u'
+    ), params)
+    conn.execute(text(
+        "UPDATE users SET username = :new_u "
+        "WHERE UPPER(username) = :old_u AND role IN ('advisor', 'adviser')"
+    ), params)
+
+
+def _rename_investor_id(conn, old_id, new_id):
+    """Update investor_id and all references after legacy → DEFIN migration."""
+    old_u, new_u = old_id.upper(), new_id.upper()
+    params = {'old': old_id, 'new': new_id, 'old_u': old_u, 'new_u': new_u}
+    conn.execute(text(
+        'UPDATE members SET investor_id = :new WHERE investor_id = :old'
+    ), params)
+    conn.execute(text(
+        'UPDATE advisers SET investor_id = :new WHERE investor_id = :old'
+    ), params)
+    conn.execute(text(
+        'UPDATE investments SET investor_id = :new WHERE investor_id = :old'
+    ), params)
+    try:
+        conn.execute(text(
+            'UPDATE installments SET investor_id = :new WHERE investor_id = :old'
+        ), params)
+    except Exception:
+        pass
+    conn.execute(text(
+        "UPDATE users SET username = :new_u "
+        "WHERE UPPER(username) = :old_u AND role = 'member'"
+    ), params)
+
+
+def migrate_legacy_dfx_to_def_ids(db):
+    """
+    Convert legacy DFX-* adviser/investor IDs to DEFAD*/DEFIN* on startup.
+    Safe to run every boot — no-op when nothing legacy remains.
+    """
+    try:
+        from models.adviser import Adviser
+        from models.member import Member
+        from utils.datetime_utils import now_ist
+
+        year = now_ist().year
+        adviser_renames = []
+        investor_renames = []
+
+        defad_taken = {
+            (a.adviser_code or '').upper()
+            for a in Adviser.query.filter(
+                Adviser.adviser_code.like(f'DEFAD{year}%')
+            ).all()
+        }
+        legacy_advisers = Adviser.query.filter(
+            or_(
+                Adviser.adviser_code.like('DFX-%'),
+                Adviser.adviser_code.like('DFX-ADV-%'),
+                Adviser.adviser_code.like('DFX-INV-%'),
+            )
+        ).order_by(Adviser.id.asc()).all()
+
+        for adv in legacy_advisers:
+            old = adv.adviser_code
+            new = _next_def_code('DEFAD', year, defad_taken)
+            adviser_renames.append((old, new))
+
+        defin_taken = {
+            (m.investor_id or '').upper()
+            for m in Member.query.filter(
+                Member.investor_id.like(f'DEFIN{year}%')
+            ).all()
+        }
+        legacy_members = Member.query.filter(
+            or_(
+                Member.investor_id.like('DFX-%'),
+                Member.investor_id.like('DFX-INV-%'),
+                Member.investor_id.like('DFX-ADV-%'),
+            )
+        ).order_by(Member.id.asc()).all()
+
+        for member in legacy_members:
+            old = member.investor_id
+            if _is_legacy_dfx_code(old):
+                new = _next_def_code('DEFIN', year, defin_taken)
+                investor_renames.append((old, new))
+
+        if not adviser_renames and not investor_renames:
+            return
+
+        with db.engine.connect() as conn:
+            for old, new in adviser_renames:
+                _rename_adviser_code(conn, old, new)
+                print(f'  OK   adviser  {old} → {new}')
+            for old, new in investor_renames:
+                _rename_investor_id(conn, old, new)
+                print(f'  OK   investor {old} → {new}')
+            conn.commit()
+
+        db.session.expire_all()
+        print(
+            f'  OK   Migrated {len(adviser_renames)} adviser(s), '
+            f'{len(investor_renames)} investor(s) to DEFAD/DEFIN format'
+        )
+    except Exception as e:
+        db.session.rollback()
+        print(f'  NOTE legacy DFX→DEF migration: {e}')
 
 
 def _column_udt_name(conn, table, column):
