@@ -301,6 +301,14 @@ def _adviser_by_mobile(mobile):
     return None
 
 
+def _def_ad_equiv(code, from_prefix, to_prefix):
+    """Map DEFIN202601 ↔ DEFAD202601 (same year+sequence, different role prefix)."""
+    c = (code or '').strip().upper()
+    if c.startswith(from_prefix) and len(c) > len(from_prefix):
+        return to_prefix + c[len(from_prefix):]
+    return None
+
+
 def find_promoter_adviser(raw_code):
     """
     Resolve promoter adviser for downline registration.
@@ -334,19 +342,41 @@ def find_promoter_adviser(raw_code):
         if member:
             adviser = _adviser_by_mobile(member.mobile)
             if not adviser:
+                alt = _def_ad_equiv(code, 'DEFIN', 'DEFAD')
+                hint = f' Try Adviser ID: {alt}.' if alt else ''
                 return None, (
                     f'"{code}" is an Investor ID ({member.full_name or "investor"}), '
-                    f'not an Adviser ID. Enter the promoter\'s Adviser code '
-                    f'(e.g. DEFAD202601).'
+                    f'not an Adviser ID. Enter the promoter\'s Adviser code (DEFAD...).'
+                    f'{hint}'
                 )
+        else:
+            # Common mistake: DEFIN instead of DEFAD for the same sequence number
+            alt_code = _def_ad_equiv(code, 'DEFIN', 'DEFAD')
+            if alt_code:
+                alt_adviser, _user = find_adviser_identity(alt_code)
+                if alt_adviser:
+                    adviser = alt_adviser
 
     if not adviser:
         hints = defad_id_suggestions()
         msg = f'Promoter Adviser ID "{code}" not found.'
+        if code.startswith('DEFIN'):
+            alt = _def_ad_equiv(code, 'DEFIN', 'DEFAD')
+            if alt:
+                msg = (
+                    f'"{code}" is Investor ID format (DEFIN...). '
+                    f'Promoter field requires Adviser ID (DEFAD...). Try: {alt}.'
+                )
+                sample = Adviser.query.filter(
+                    db.func.upper(Adviser.adviser_code) == alt,
+                    Adviser.is_active == True,
+                ).first()
+                if sample:
+                    return sample, None
         sample = Adviser.query.filter_by(is_active=True).order_by(Adviser.id.desc()).limit(5).all()
-        if sample:
+        if sample and not code.startswith('DEFIN'):
             msg += ' Active adviser codes: ' + ', '.join(a.adviser_code for a in sample) + '.'
-        elif hints:
+        elif hints and not code.startswith('DEFIN'):
             msg += f' Available DEFAD IDs: {", ".join(hints)}.'
         return None, msg
 
