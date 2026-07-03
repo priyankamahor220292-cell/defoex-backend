@@ -2,7 +2,6 @@
 Resolve a Member (investor) from any known ID format:
   - DEFIN202601      → investor_id (Member)
   - DEFAD202601      → adviser_code OR adviser login username → linked Member
-  - DFX-2026-000002  → adviser_code (legacy) → linked Member
 """
 
 from datetime import datetime
@@ -316,7 +315,7 @@ def find_promoter_adviser(raw_code):
     if 'DFX-IRN-' in code:
         return None, (
             'That is an Investment Bond number, not an adviser code. '
-            'Use an Adviser ID such as DFX-2026-000006 or DEFAD login.'
+            'Use an Adviser ID such as DEFAD202601.'
         )
 
     adviser, _user = find_adviser_identity(code)
@@ -338,7 +337,7 @@ def find_promoter_adviser(raw_code):
                 return None, (
                     f'"{code}" is an Investor ID ({member.full_name or "investor"}), '
                     f'not an Adviser ID. Enter the promoter\'s Adviser code '
-                    f'(e.g. DFX-2026-000006 or DEFAD login username).'
+                    f'(e.g. DEFAD202601).'
                 )
 
     if not adviser:

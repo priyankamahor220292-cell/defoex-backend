@@ -13,6 +13,7 @@ from utils.member_lookup import find_promoter_adviser
 import json
 import traceback
 
+
 advisers_bp = Blueprint('advisers', __name__, url_prefix='/api/advisers')
 
 ADVISER_FEE = 650  # Fixed adviser registration fee

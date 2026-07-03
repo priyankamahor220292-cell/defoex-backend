@@ -71,9 +71,11 @@ with app.app_context():
     admin.set_password('Defoex@2024')
     db.session.add(admin)
 
-    # Company Owner Adviser
+    # Company Owner Adviser — DEFAD{year}{seq}, e.g. DEFAD202601
+    from utils.helpers import generate_adviser_code
+    owner_code = generate_adviser_code()
     db.session.add(Adviser(
-        adviser_code='DFX-2026-000001',
+        adviser_code=owner_code,
         full_name='Company Owner',
         mobile='9999999999',
         email='owner@defoex.com',
@@ -102,6 +104,6 @@ with app.app_context():
         print(f"  ✓ {t[0]}")
 
     print("\n  Login:    superadmin / Defoex@2024")
-    print("  Adviser:  DFX-2026-000001")
+    print(f"  Adviser:  {owner_code}")
     print(f"  Wallet:   ₹{ADMIN_WALLET_LIMIT:,} (₹100 Crore)")
     print("\nNow run:  python app.py")
