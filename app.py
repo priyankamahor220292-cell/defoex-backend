@@ -116,8 +116,28 @@ if __name__ == '__main__':
     # to disable auto-reload, or press Ctrl+C once and wait for a clean exit.
     use_reloader = os.environ.get('FLASK_RELOAD', '1') == '1'
 
+    port = int(os.environ.get('FLASK_PORT', 5001))
+
+    import socket
+
+    def _port_in_use(p):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(('0.0.0.0', p))
+                return False
+            except OSError:
+                return True
+
+    if not use_reloader and _port_in_use(port):
+        print(f'\nPort {port} is already in use.')
+        print(f'  • Backend may already be running — try http://localhost:{port}/health')
+        print(f'  • To stop it: lsof -i :{port}   then   kill <PID>')
+        print(f'  • Or use another port: FLASK_PORT=5002 python app.py')
+        sys.exit(1)
+
     try:
-        app.run(debug=True, host='0.0.0.0', port=5001, use_reloader=use_reloader)
+        app.run(debug=True, host='0.0.0.0', port=port, use_reloader=use_reloader)
     except KeyboardInterrupt:
         print('\nDefOex backend stopped.')
         sys.exit(0)

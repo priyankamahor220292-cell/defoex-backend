@@ -100,17 +100,36 @@ def get_branch(branch_id):
 @branches_bp.route('/', methods=['POST'])
 @jwt_required()
 def create_branch():
+    from sqlalchemy.exc import IntegrityError
+
     claims = get_jwt()
     if claims.get('role') != 'superadmin':
         return jsonify(error_response('Unauthorized', 403)[0]), 403
-    data   = request.get_json() or {}
-    allowed = ['branch_code','branch_name','address','city','state','pincode',
-               'manager_name','manager_email','manager_mobile','is_active']
+
+    data = request.get_json(silent=True) or {}
+    branch_code = (data.get('branch_code') or '').strip()
+    branch_name = (data.get('branch_name') or '').strip()
+    if not branch_code or not branch_name:
+        return jsonify(error_response('Branch code and name are required', 400)[0]), 400
+
+    allowed = ['branch_code', 'branch_name', 'address', 'city', 'state', 'pincode',
+               'manager_name', 'manager_email', 'manager_mobile', 'is_active']
     branch = Branch(**{k: v for k, v in data.items() if k in allowed})
-    db.session.add(branch)
-    db.session.flush()
-    db.session.add(BranchWallet(branch_id=branch.id, current_balance=0, cash_wallet=0))
-    db.session.commit()
+    branch.branch_code = branch_code.upper()
+    branch.branch_name = branch_name
+
+    try:
+        db.session.add(branch)
+        db.session.flush()
+        db.session.add(BranchWallet(branch_id=branch.id, current_balance=0, cash_wallet=0))
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify(error_response(f'Branch code "{branch_code}" already exists', 409)[0]), 409
+    except Exception as e:
+        db.session.rollback()
+        print(traceback.format_exc())
+        return jsonify(error_response(f'Failed to create branch: {e}', 500)[0]), 500
 
     # Auto-create branch-specific tables
     try:

@@ -25,7 +25,7 @@ class Config:
     else:
         DB_HOST = os.getenv("DB_HOST", "localhost")
         DB_PORT = os.getenv("DB_PORT", "5432")
-        DB_NAME = os.getenv("DB_NAME", "defoex_db")
+        DB_NAME = os.getenv("DB_NAME", "defoex_database")
         DB_USER = os.getenv("DB_USER", "priyankamahor")
 
         # Encode special chars like @
