@@ -1065,7 +1065,18 @@ def approve_investment(investment_id):
             elif first_inst:
                 investment.due_date = investment.maturity_date
 
-            commissions = process_investment_commissions(investment)
+            # Save approval first — commissions must not block plan approval
+            db.session.commit()
+            db.session.refresh(investment)
+
+            commissions = []
+            try:
+                commissions = process_investment_commissions(investment)
+                if commissions:
+                    db.session.commit()
+            except Exception as comm_err:
+                db.session.rollback()
+                print(f'Commission warning (plan still approved): {comm_err}')
 
             msg = (
                 f'Investment plan approved. '
@@ -1093,12 +1104,12 @@ def approve_investment(investment_id):
             investment.status = 'Cancelled'
             msg = 'Investment plan rejected'
 
-        db.session.commit()
+        if action != 'approve':
+            db.session.commit()
         resp = {'success': True, 'message': msg}
         if wallet_result:
             resp['wallet'] = wallet_result
         if action == 'approve':
-            db.session.refresh(investment)
             resp['data'] = investment.to_dict()
         return jsonify(resp), 200
 

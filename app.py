@@ -131,10 +131,14 @@ if __name__ == '__main__':
             except OSError:
                 return True
 
-    if not use_reloader and _port_in_use(port):
+    # With debug reloader, only the parent should check the port. The child
+    # (WERKZEUG_RUN_MAIN=true) re-runs this block while the parent still holds
+    # the socket briefly — checking there causes a false "port in use" error.
+    is_reloader_child = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+    if (not use_reloader or not is_reloader_child) and _port_in_use(port):
         print(f'\nPort {port} is already in use.')
         print(f'  • Backend may already be running — try http://localhost:{port}/health')
-        print(f'  • To stop it: lsof -i :{port}   then   kill <PID>')
+        print(f'  • To stop it: lsof -ti :{port} | xargs kill')
         print(f'  • Or use another port: FLASK_PORT=5002 python app.py')
         sys.exit(1)
 
