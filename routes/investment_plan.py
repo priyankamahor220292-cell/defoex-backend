@@ -24,6 +24,7 @@ from extensions import db
 from models.investment import (
     Investment, Installment, MIS_PLANS, MIS_AMOUNTS, MIS_MIN_AMOUNT, MIS_MAX_AMOUNT,
     SIS_PLANS, SIS_REF, mis_rate_chart, sis_rate_chart, SIS_AMOUNTS,
+    investment_progress,
 )
 from models.commission import Commission
 from models.member import Member
@@ -708,6 +709,161 @@ def create_sis_plan():
 
 # ─── MIS CONTRIBUTION ────────────────────────────────────────────────────────
 
+def _enrich_contribution_plan(investment):
+    """Build MIS contribution card payload with TRI and SMI status."""
+    d = investment.to_dict()
+    monthly = float(investment.monthly_amount or 0)
+    paid = investment.installments_paid or 0
+    total = investment.total_installments or 0
+    tri = d.get('tri', 0)
+    due = investment.due_date
+    today = today_ist()
+    is_overdue = bool(due and today > due and paid < total)
+    penalty_amount = 50 if is_overdue else 0
+    base_amount = monthly
+    payable_amount = base_amount + penalty_amount
+
+    d.update({
+        'status_label': d.get('status_label') or f'{paid} of {total}',
+        'tri': tri,
+        'total_received_investment': tri,
+        'next_due_date': due.isoformat() if due else None,
+        'is_overdue': is_overdue,
+        'base_amount': base_amount,
+        'penalty_amount': penalty_amount,
+        'payable_amount': payable_amount,
+    })
+    return d
+
+
+@investment_plan_bp.route('/mis-contribution', methods=['GET'])
+@jwt_required()
+def get_mis_contribution():
+    """Fetch approved MIS plans for an investor (TRI + SMI status)."""
+    denied = _require_plan_admin()
+    if denied:
+        return denied
+
+    investor_id = (request.args.get('investor_id') or '').strip()
+    if not investor_id:
+        return jsonify({'success': False, 'message': 'investor_id is required'}), 400
+
+    member, err = _get_member_by_any_id(investor_id)
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
+
+    plans = Investment.query.filter_by(
+        investor_id=member.investor_id,
+        approval_status='Approved',
+        plan_type='MIS',
+    ).filter(Investment.status.in_(['Active', 'Completed'])).all()
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'investor': {
+                'investor_id': member.investor_id,
+                'investor_name': member.full_name,
+                'father_name': member.father_spouse_name,
+                'mobile': member.mobile,
+                'adviser_id': member.adviser_code,
+                'nominee_name': member.nominee_name,
+            },
+            'plans': [_enrich_contribution_plan(p) for p in plans],
+        },
+    }), 200
+
+
+@investment_plan_bp.route('/pay-installment/<int:investment_id>', methods=['POST'])
+@jwt_required()
+def pay_installment(investment_id):
+    """Pay next MIS installment (Schedule Monthly Investment / SMI)."""
+    denied = _require_plan_admin()
+    if denied:
+        return denied
+
+    investment = Investment.query.get(investment_id)
+    if not investment:
+        return jsonify({'success': False, 'message': 'Investment plan not found'}), 404
+
+    if investment.approval_status != 'Approved':
+        return jsonify({'success': False, 'message': 'Investment plan is not approved yet'}), 400
+
+    if investment.plan_type != 'MIS':
+        return jsonify({'success': False, 'message': 'Only MIS plans support monthly installments'}), 400
+
+    amount = Decimal(str(investment.monthly_amount))
+    today = today_ist()
+    due = investment.due_date
+    is_overdue = bool(due and today > due and (investment.installments_paid or 0) < (investment.total_installments or 0))
+    penalty = Decimal('50') if is_overdue else Decimal('0')
+    payable = amount + penalty
+
+    paid_count = Installment.query.filter_by(investment_id=investment_id, status='Paid').count()
+    if paid_count >= (investment.total_installments or 0):
+        return jsonify({'success': False, 'message': 'All installments have already been paid'}), 400
+
+    next_inst_no = paid_count + 1
+
+    try:
+        inst = Installment(
+            investment_id=investment_id,
+            investor_id=investment.investor_id,
+            installment_number=next_inst_no,
+            due_date=today,
+            paid_date=today,
+            amount=float(payable),
+            payment_mode=investment.payment_mode or 'Cash',
+            status='Paid',
+        )
+        db.session.add(inst)
+        investment.installments_paid = next_inst_no
+        investment.due_date = today + relativedelta(months=1)
+
+        identity = get_jwt_identity()
+        wallet_result, wallet_err = deduct_branch_wallet(
+            investment.branch_id,
+            float(payable),
+            f'MIS installment #{next_inst_no} — {investment.investor_id} ({investment.irn})',
+            reference_id=f'INSTALL-{investment_id}-{next_inst_no}',
+            created_by=identity,
+        )
+        if wallet_err:
+            db.session.rollback()
+            return jsonify({'success': False, 'message': wallet_err}), 400
+
+        db.session.commit()
+
+        _, total, tri, status_label = investment_progress(
+            investment.plan_type,
+            investment.installments_paid,
+            investment.total_installments,
+            investment.monthly_amount,
+        )
+
+        return jsonify({
+            'success': True,
+            'message': f'Installment #{next_inst_no} paid successfully',
+            'data': {
+                'installment_no': next_inst_no,
+                'amount_paid': float(payable),
+                'base_amount': float(amount),
+                'penalty': float(penalty),
+                'is_overdue': is_overdue,
+                'tri': tri,
+                'total_received_investment': tri,
+                'status_label': status_label,
+                'installments_paid': investment.installments_paid,
+                'total_installments': investment.total_installments,
+                'wallet': wallet_result,
+            },
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Payment failed: {str(e)}'}), 500
+
+
 @investment_plan_bp.route('/mis-contribution', methods=['POST'])
 @jwt_required()
 def mis_contribution():
@@ -809,6 +965,13 @@ def mis_contribution():
 
         db.session.commit()
 
+        _, total, tri, status_label = investment_progress(
+            investment.plan_type,
+            investment.installments_paid,
+            investment.total_installments,
+            investment.monthly_amount,
+        )
+
         return jsonify({
             'success': True,
             'message': (
@@ -820,6 +983,10 @@ def mis_contribution():
                 'total_paid':       next_inst_no,
                 'remaining':        investment.total_installments - next_inst_no,
                 'payment_mode':     payment_mode,
+                'amount_paid':      float(amount),
+                'tri':              tri,
+                'total_received_investment': tri,
+                'status_label':     status_label,
                 'wallet':           wallet_result,
             }
         }), 201
@@ -926,6 +1093,9 @@ def approve_investment(investment_id):
         resp = {'success': True, 'message': msg}
         if wallet_result:
             resp['wallet'] = wallet_result
+        if action == 'approve':
+            db.session.refresh(investment)
+            resp['data'] = investment.to_dict()
         return jsonify(resp), 200
 
     except Exception as e:
@@ -1113,11 +1283,13 @@ def list_investments():
 
     empty = {
         'success': True,
-        'data': [],
-        'total': 0,
-        'page': page,
-        'per_page': per_page,
-        'pages': 0,
+        'data': {
+            'items': [],
+            'total': 0,
+            'page': page,
+            'per_page': per_page,
+            'pages': 0,
+        },
     }
 
     q = Investment.query
@@ -1173,11 +1345,13 @@ def list_investments():
 
     return jsonify({
         'success': True,
-        'data': items,
-        'total':    paginated.total,
-        'page':     page,
-        'per_page': per_page,
-        'pages':    paginated.pages,
+        'data': {
+            'items':    items,
+            'total':    paginated.total,
+            'page':     page,
+            'per_page': per_page,
+            'pages':    paginated.pages,
+        },
     }), 200
 
 
@@ -1243,6 +1417,9 @@ def investment_receipt(irn):
     if not member:
         return jsonify({'success': False, 'message': 'Investor not found'}), 404
 
+    branch = Branch.query.get(investment.branch_id) if investment.branch_id else None
+    branch_name = branch.branch_name.upper() if branch and branch.branch_name else '—'
+
     paid = investment.installments_paid or 0
     total = investment.total_installments or 0
     monthly = float(investment.monthly_amount or 0)
@@ -1286,9 +1463,9 @@ def investment_receipt(irn):
             'total_received': tri,
             'return_of_investment': roi_amount,
             'payment_mode': (payment_mode or 'Cash').upper(),
+            'branch_name': branch_name,
             'remarks': (
-                'Received with thanks towards the single lump-sum investment '
-                'under the selected SIS plan.'
+                'Received with thanks towards the investment amount under the selected investment plan.'
                 if is_sis else
                 'Received with thanks towards the monthly investment installment '
                 'under the selected investment plan.'

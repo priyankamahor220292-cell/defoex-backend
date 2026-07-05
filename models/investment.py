@@ -89,6 +89,21 @@ def tenure_display(plan_type, plan_tenure):
     return plan_tenure or ''
 
 
+def investment_progress(plan_type, installments_paid, total_installments, monthly_amount):
+    """TRI and SMI status: paid months × monthly amount; status 'N of total'."""
+    paid = installments_paid or 0
+    total = total_installments or 0
+    monthly = float(monthly_amount) if monthly_amount else 0
+
+    if plan_type == 'SIS':
+        tri = monthly if paid else 0
+    else:
+        tri = round(paid * monthly, 2) if paid and monthly else 0
+
+    status_label = f'{paid} of {total}' if total else f'{paid} of 0'
+    return paid, total, tri, status_label
+
+
 class Investment(db.Model):
     __tablename__ = 'investments'
 
@@ -162,7 +177,9 @@ class Investment(db.Model):
         paid = self.installments_paid or 0
         total_inst = self.total_installments or 0
         monthly = float(self.monthly_amount) if self.monthly_amount else 0
-        tri = round(paid * monthly, 2) if paid and monthly else 0
+        paid, total_inst, tri, status_label = investment_progress(
+            self.plan_type, paid, total_inst, self.monthly_amount
+        )
 
         return {
             'id':                      self.id,
@@ -189,9 +206,9 @@ class Investment(db.Model):
             'total_installments':      total_inst,
             'total_received_investment': tri,
             'tri':                     tri,
-            'installment_status':    (
-                f'{paid} of {total_inst}' if total_inst else f'{paid} of 0'
-            ),
+            'installment_status':      status_label,
+            'status_label':            status_label,
+            'smi_status':              status_label,
             'adviser_code':            self.adviser_code,
             'approval_status':         self.approval_status,
             'status':                  self.status,

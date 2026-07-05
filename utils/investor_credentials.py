@@ -42,8 +42,25 @@ def _unique_member_email(username, preferred=None):
     return f'{username.lower()}.{secrets.token_hex(3)}@defoex.com'
 
 
+def _issue_login_password(user):
+    """Generate a 10-character hex password and persist it on the user."""
+    password = secrets.token_hex(5)
+    user.set_password(password)
+    return password
+
+
+def _credentials_payload(member, username, password, **extra):
+    return {
+        'username': username,
+        'password': password,
+        'full_name': member.full_name,
+        'investor_id': member.investor_id,
+        **extra,
+    }
+
+
 def _deduct_member_fee(member, approved_by_id):
-    """Investor registration fee ₹10 — branch limit ↓, cash wallet ↑."""
+    """Investor registration fee — branch limit ↓, cash wallet ↑."""
     fees = float(member.member_fees or 10)
     branch_id = _resolve_member_branch(member)
 
@@ -61,18 +78,25 @@ def _deduct_member_fee(member, approved_by_id):
 
 def finalize_investor_registration(member, approved_by_id):
     """
-    Mark member approved, create member User, deduct ₹10 branch fee.
+    Mark member approved, create member User, deduct registration fee.
     Returns (credentials_dict, error_message).
     """
     if (member.approval_status or '').lower() == 'approved':
         existing = User.query.filter_by(mobile=member.mobile, role='member').first()
+        if not existing:
+            existing = User.query.filter(
+                db.func.upper(User.username) == _investor_username(member)
+            ).first()
         if existing:
-            return {
-                'username': existing.username,
-                'password': None,
-                'already_approved': True,
-                'message': f'Investor already approved. Username: {existing.username}',
-            }, None
+            password = _issue_login_password(existing)
+            db.session.commit()
+            return _credentials_payload(
+                member,
+                existing.username,
+                password,
+                already_approved=True,
+                message=f'Investor already approved. New password issued for {existing.username}',
+            ), None
         return None, 'Investor already approved but login user not found'
 
     existing_user = User.query.filter_by(mobile=member.mobile).first()
@@ -85,6 +109,18 @@ def finalize_investor_registration(member, approved_by_id):
             if taken:
                 return None, f'Login username {username} is already assigned to another user'
             existing_user.username = username
+
+        if existing_user.role != 'member':
+            existing_user.role = 'member'
+        if member.full_name:
+            existing_user.full_name = member.full_name
+        if member.email:
+            existing_user.email = member.email or existing_user.email
+        branch_id = _resolve_member_branch(member)
+        if branch_id:
+            existing_user.branch_id = branch_id
+
+        password = _issue_login_password(existing_user)
 
         member.approval_status = 'Approved'
         member.approved_by = int(approved_by_id) if approved_by_id else None
@@ -100,13 +136,17 @@ def finalize_investor_registration(member, approved_by_id):
         except Exception as ex:
             db.session.rollback()
             return None, f'Approval failed: {str(ex)}'
-        return {
-            'username': existing_user.username,
-            'password': None,
-            'already_has_user': True,
-            'wallet': fee_result,
-            'message': f'Approved — login username: {existing_user.username}',
-        }, None
+        return _credentials_payload(
+            member,
+            existing_user.username,
+            password,
+            already_has_user=True,
+            wallet=fee_result,
+            message=(
+                f'Congratulations Investor Created! Username: {existing_user.username} '
+                f'Password: {password}'
+            ),
+        ), None
 
     username = _investor_username(member)
     if not username:
@@ -118,7 +158,6 @@ def finalize_investor_registration(member, approved_by_id):
     if taken and taken.mobile != member.mobile:
         return None, f'Login username {username} is already assigned to another user'
 
-    password = secrets.token_hex(5)
     email = _unique_member_email(username, member.email)
     branch_id = _resolve_member_branch(member)
 
@@ -131,7 +170,7 @@ def finalize_investor_registration(member, approved_by_id):
         branch_id=branch_id,
         is_active=True,
     )
-    inv_user.set_password(password)
+    password = _issue_login_password(inv_user)
 
     member.approval_status = 'Approved'
     member.approved_by = int(approved_by_id) if approved_by_id else None
@@ -155,14 +194,15 @@ def finalize_investor_registration(member, approved_by_id):
         db.session.rollback()
         return None, f'Approval failed: {str(ex)}'
 
-    return {
-        'username': username,
-        'password': password,
-        'wallet': fee_result,
-        'message': (
+    return _credentials_payload(
+        member,
+        username,
+        password,
+        wallet=fee_result,
+        message=(
             f'Congratulations Investor Created! Username: {username} Password: {password}'
         ),
-    }, None
+    ), None
 
 
 def _link_adviser_investor(member):
