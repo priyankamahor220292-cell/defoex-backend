@@ -5,8 +5,8 @@ Routes for: MIS Plan, SIS Plan, MIS Contribution, Approve Investment
 Fixes & Features in this version:
   1. get-investor-details → accepts investor_id OR adviser_id
      AND accepts status == 'approved' OR 'active'
-  2. Plan amount must be a multiple of ₹1,000 (min ₹1,000)
-     [Old 10rs plan bug: FIXED — minimum is now ₹1,000]
+  2. MIS monthly amount must be one of the official chart amounts (₹100–₹30,000)
+  3. SIS lump sum must be a multiple of ₹1,000 (min ₹1,000)
   3. UPI payment: transaction_id (alphanumeric, max 35 chars) + upi_app
      stored when payment_mode == 'UPI'
   4. Cash payment: no extra fields required
@@ -21,7 +21,8 @@ from dateutil.relativedelta import relativedelta
 import re
 
 from extensions import db
-from models.investment import Investment, Installment, MIS_PLANS, SIS_PLANS
+from models.investment import Investment, Installment, MIS_PLANS, MIS_AMOUNTS, SIS_PLANS, mis_rate_chart
+from models.commission import Commission
 from models.member import Member
 from models.adviser import Adviser
 from models.branch import Branch
@@ -44,13 +45,35 @@ investment_plan_bp = Blueprint('investment_plan', __name__, url_prefix='/api/inv
 # ─── Constants ───────────────────────────────────────────────────────────────
 VALID_UPI_APPS = {'phonepe', 'paytm', 'gpay', 'googlepay', 'bhim', 'other'}
 TRANSACTION_ID_RE = re.compile(r'^[A-Za-z0-9]{1,35}$')
-MIN_PLAN_AMOUNT = Decimal('1000')
+MIN_SIS_AMOUNT = Decimal('1000')
+MIS_AMOUNT_SET = {Decimal(str(a)) for a in MIS_AMOUNTS}
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def _validate_amount(amount_raw):
+def _validate_mis_amount(amount_raw):
     """
-    Validate that amount is a positive integer multiple of 1000.
+    Validate MIS monthly amount against official rate chart.
+    Returns (Decimal, None) on success or (None, error_str) on failure.
+    """
+    try:
+        amount = Decimal(str(amount_raw))
+        if amount <= 0:
+            raise ValueError
+        if amount != int(amount):
+            raise ValueError
+    except (TypeError, ValueError, InvalidOperation):
+        return None, 'Amount must be a positive whole number'
+
+    if amount not in MIS_AMOUNT_SET:
+        allowed = ', '.join(f'₹{int(a):,}' for a in MIS_AMOUNTS)
+        return None, f'Invalid MIS amount. Choose from official chart: {allowed}'
+
+    return amount, None
+
+
+def _validate_sis_amount(amount_raw):
+    """
+    Validate SIS lump-sum amount (multiple of ₹1,000, min ₹1,000).
     Returns (Decimal, None) on success or (None, error_str) on failure.
     """
     try:
@@ -60,11 +83,11 @@ def _validate_amount(amount_raw):
     except (TypeError, ValueError, InvalidOperation):
         return None, 'Amount must be a positive number'
 
-    if amount < MIN_PLAN_AMOUNT:
-        return None, f'Minimum investment amount is ₹1,000'
+    if amount < MIN_SIS_AMOUNT:
+        return None, 'Minimum SIS investment amount is ₹1,000'
 
     if amount % 1000 != 0:
-        return None, 'Investment amount must be a multiple of ₹1,000 (e.g. ₹1,000 / ₹2,000 / ₹5,000)'
+        return None, 'SIS amount must be a multiple of ₹1,000 (e.g. ₹5,000 / ₹10,000)'
 
     return amount, None
 
@@ -107,6 +130,16 @@ def _require_plan_admin():
         return jsonify({
             'success': False,
             'message': 'Unauthorized — only branch manager or admin can perform this action',
+        }), 403
+    return None
+
+
+def _require_superadmin():
+    """Only superadmin may delete investment plans."""
+    if current_role() != 'superadmin':
+        return jsonify({
+            'success': False,
+            'message': 'Unauthorized — only admin can delete investment plans',
         }), 403
     return None
 
@@ -309,18 +342,47 @@ def get_investor_details(member_id=None):
     return jsonify({'success': False, 'message': err or f'No record found for "{code}"'}), 400
 
 
+# ─── MIS RATE CHART ──────────────────────────────────────────────────────────
+
+@investment_plan_bp.route('/mis-chart', methods=['GET'])
+@jwt_required()
+def get_mis_chart():
+    """Return official MIS rate chart (monthly amounts × 3Y/5Y/7Y projections)."""
+    return jsonify({
+        'success': True,
+        'data': {
+            'plans': MIS_PLANS,
+            'amounts': MIS_AMOUNTS,
+            'rows': mis_rate_chart(),
+        },
+    }), 200
+
+
+# ─── CREATE (unified) ────────────────────────────────────────────────────────
+
+@investment_plan_bp.route('/create', methods=['POST'])
+@jwt_required()
+def create_plan():
+    """Create MIS or SIS plan based on plan_type in JSON body."""
+    data = request.get_json(force=True) or {}
+    plan_type = (data.get('plan_type') or 'MIS').strip().upper()
+    if plan_type == 'SIS':
+        if data.get('monthly_amount') and not data.get('lump_amount'):
+            data = {**data, 'lump_amount': data['monthly_amount']}
+        return _do_create_sis(data)
+    return _do_create_mis(data)
+
+
 # ─── CREATE MIS PLAN ─────────────────────────────────────────────────────────
 
-@investment_plan_bp.route('/create-mis', methods=['POST'])
-@jwt_required()
-def create_mis_plan():
+def _do_create_mis(data):
     """
     Create a new MIS Plan.
 
     JSON body:
       investor_id    : str   (investor_id or adviser_id)
       plan_tenure    : str   ('3Y', '5Y', '7Y')
-      monthly_amount : int   (must be multiple of 1000, min 1000)
+      monthly_amount : int   (official MIS chart amount: 100, 200, 500, ... 30000)
       payment_mode   : str   ('Cash' or 'UPI')
       transaction_id : str   (required if UPI, alphanumeric, max 35)
       upi_app        : str   (required if UPI: phonepe/paytm/gpay/bhim/other)
@@ -329,7 +391,6 @@ def create_mis_plan():
     denied = _require_plan_admin()
     if denied:
         return denied
-    data = request.get_json(force=True) or {}
 
     # 1. Validate member
     member, err = _get_member_by_any_id(data.get('investor_id', ''))
@@ -343,7 +404,7 @@ def create_mis_plan():
                         'message': f'Invalid MIS tenure. Choose: {", ".join(MIS_PLANS.keys())}'}), 400
 
     # 3. Validate amount
-    amount, err = _validate_amount(data.get('monthly_amount'))
+    amount, err = _validate_mis_amount(data.get('monthly_amount'))
     if err:
         return jsonify({'success': False, 'message': err}), 400
 
@@ -441,11 +502,15 @@ def create_mis_plan():
         return jsonify({'success': False, 'message': f'Failed to create MIS Plan: {str(e)}'}), 500
 
 
+@investment_plan_bp.route('/create-mis', methods=['POST'])
+@jwt_required()
+def create_mis_plan():
+    return _do_create_mis(request.get_json(force=True) or {})
+
+
 # ─── CREATE SIS PLAN ─────────────────────────────────────────────────────────
 
-@investment_plan_bp.route('/create-sis', methods=['POST'])
-@jwt_required()
-def create_sis_plan():
+def _do_create_sis(data):
     """
     Create a new SIS Plan (lump sum, 7.5 Year, amount doubles at maturity).
 
@@ -460,13 +525,12 @@ def create_sis_plan():
     denied = _require_plan_admin()
     if denied:
         return denied
-    data = request.get_json(force=True) or {}
 
     member, err = _get_member_by_any_id(data.get('investor_id', ''))
     if err:
         return jsonify({'success': False, 'message': err}), 400
 
-    amount, err = _validate_amount(data.get('lump_amount'))
+    amount, err = _validate_sis_amount(data.get('lump_amount'))
     if err:
         return jsonify({'success': False, 'message': err}), 400
 
@@ -555,6 +619,12 @@ def create_sis_plan():
         return jsonify({'success': False, 'message': f'Failed to create SIS Plan: {str(e)}'}), 500
 
 
+@investment_plan_bp.route('/create-sis', methods=['POST'])
+@jwt_required()
+def create_sis_plan():
+    return _do_create_sis(request.get_json(force=True) or {})
+
+
 # ─── MIS CONTRIBUTION ────────────────────────────────────────────────────────
 
 @investment_plan_bp.route('/mis-contribution', methods=['POST'])
@@ -565,7 +635,7 @@ def mis_contribution():
 
     JSON body:
       investment_id  : int
-      amount         : int   (must be multiple of 1000)
+      amount         : int   (must match plan monthly amount)
       payment_mode   : str   ('Cash' or 'UPI')
       transaction_id : str   (required if UPI)
       upi_app        : str   (required if UPI)
@@ -588,9 +658,12 @@ def mis_contribution():
         return jsonify({'success': False,
                         'message': 'Investment plan is not approved yet'}), 400
 
-    amount, err = _validate_amount(data.get('amount'))
-    if err:
-        return jsonify({'success': False, 'message': err}), 400
+    try:
+        amount = Decimal(str(data.get('amount')))
+        if amount <= 0:
+            raise ValueError
+    except (TypeError, ValueError, InvalidOperation):
+        return jsonify({'success': False, 'message': 'Amount must be a positive number'}), 400
 
     # Validate contribution matches plan monthly amount
     plan_monthly = Decimal(str(investment.monthly_amount))
@@ -777,6 +850,65 @@ def approve_investment(investment_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'success': False, 'message': f'Action failed: {str(e)}'}), 500
+
+
+@investment_plan_bp.route('/<int:investment_id>', methods=['DELETE'])
+@jwt_required()
+def delete_investment(investment_id):
+    """Super Admin only — permanently delete an investment plan."""
+    denied = _require_superadmin()
+    if denied:
+        return denied
+
+    investment = Investment.query.get(investment_id)
+    if not investment:
+        return jsonify({'success': False, 'message': 'Investment not found'}), 404
+
+    identity = get_jwt_identity()
+    irn = investment.irn
+
+    try:
+        if investment.approval_status == 'Approved':
+            monthly = float(investment.monthly_amount or 0)
+            if monthly > 0:
+                _, wallet_err = refund_branch_wallet(
+                    investment.branch_id,
+                    monthly,
+                    f'Investment deleted — {irn}',
+                    reference_id=f'INVEST-{investment.id}',
+                    created_by=identity,
+                )
+                if wallet_err:
+                    db.session.rollback()
+                    return jsonify({'success': False, 'message': wallet_err}), 400
+
+            paid_installments = Installment.query.filter_by(
+                investment_id=investment.id, status='Paid'
+            ).all()
+            for inst in paid_installments:
+                if inst.installment_number <= 1:
+                    continue
+                _, wallet_err = refund_branch_wallet(
+                    investment.branch_id,
+                    float(inst.amount or monthly),
+                    f'Installment #{inst.installment_number} refund — plan deleted {irn}',
+                    reference_id=f'INSTALL-{investment.id}-{inst.installment_number}',
+                    created_by=identity,
+                )
+                if wallet_err:
+                    db.session.rollback()
+                    return jsonify({'success': False, 'message': wallet_err}), 400
+
+        Installment.query.filter_by(investment_id=investment.id).delete()
+        Commission.query.filter_by(investment_id=investment.id).delete()
+        db.session.delete(investment)
+        db.session.commit()
+
+        return jsonify({'success': True, 'message': f'Investment plan {irn} deleted'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Delete failed: {str(e)}'}), 500
 
 
 # ─── LIST ALL INVESTMENTS ─────────────────────────────────────────────────────

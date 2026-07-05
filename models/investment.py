@@ -15,6 +15,33 @@ MIS_PLANS = {
     '7Y': {'months': 84, 'roi_num': 19, 'roi_den': 14, 'label': 'MIS 7 Year', 'roi_pct': '35.71', 'roi_display': '35.71%'},
 }
 
+# Official MIS monthly installment amounts — from company rate chart
+MIS_AMOUNTS = [
+    100, 200, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000,
+    5000, 6000, 7500, 9000, 10000, 12000, 15000, 20000, 25000, 30000,
+]
+
+
+def calc_mis_row(monthly):
+    """Return total investment and maturity for each MIS tenure."""
+    monthly = int(monthly)
+    row = {'monthly_amount': monthly}
+    for tenure, plan in MIS_PLANS.items():
+        months = plan['months']
+        total = monthly * months
+        maturity = (Decimal(total) * plan['roi_num'] / plan['roi_den'])
+        maturity = int(maturity.to_integral_value(rounding=ROUND_HALF_UP))
+        row[tenure] = {
+            'total_investment': total,
+            'maturity_amount': maturity,
+        }
+    return row
+
+
+def mis_rate_chart():
+    """Full MIS rate chart for API / UI."""
+    return [calc_mis_row(amount) for amount in MIS_AMOUNTS]
+
 # SIS Plan Definition — from official rate chart
 # Tenure: 7.5 Years (90 months) — Lump Sum Investment
 # Formula: maturity = investment_amount × 2  (100% ROI)

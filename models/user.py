@@ -39,5 +39,6 @@ class User(db.Model):
             'role': self.role,
             'branch_id': self.branch_id,
             'is_active': self.is_active,
-            'created_at': isoformat_ist(self.created_at)
+            'created_at': isoformat_ist(self.created_at),
+            'updated_at': isoformat_ist(self.updated_at),
         }
