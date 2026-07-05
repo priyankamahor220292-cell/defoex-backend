@@ -7,6 +7,7 @@ from sqlalchemy import text, func
 from utils.helpers import (
     generate_adviser_code, success_response, error_response,
     normalize_mobile, find_adviser_by_mobile, find_member_by_mobile,
+    validate_adviser_mobile,
 )
 from utils.rank_helpers import validate_assigned_rank, allowed_ranks_for_promoter, rank_label
 from utils.member_lookup import find_promoter_adviser
@@ -182,11 +183,9 @@ def create_adviser():
     if rank_err:
         return jsonify(error_response(rank_err)[0]), 400
 
-    existing = find_adviser_by_mobile(mobile)
-    if existing:
-        return jsonify(error_response(
-            f'This mobile is already registered as adviser {existing.adviser_code}'
-        )[0]), 409
+    mobile_err = validate_adviser_mobile(mobile, allow_approved_investor=True)
+    if mobile_err:
+        return jsonify(error_response(mobile_err, 409)[0]), 409
 
     aadhar_err = _check_aadhar_unique(aadhar, exclude_mobile=mobile)
     if aadhar_err:
@@ -297,6 +296,24 @@ def update_adviser(adviser_id):
         return jsonify(error_response('Unauthorized', 403)[0]), 403
     a = Adviser.query.get_or_404(adviser_id)
     data = request.get_json() or {}
+
+    if 'mobile' in data:
+        mobile = normalize_mobile(data.get('mobile'))
+        exclude_member_id = None
+        if a.investor_id:
+            linked = Member.query.filter_by(investor_id=a.investor_id).first()
+            if linked:
+                exclude_member_id = linked.id
+        mobile_err = validate_adviser_mobile(
+            mobile,
+            exclude_adviser_id=a.id,
+            exclude_member_id=exclude_member_id,
+            allow_approved_investor=bool(exclude_member_id),
+        )
+        if mobile_err:
+            return jsonify(error_response(mobile_err, 409)[0]), 409
+        data['mobile'] = mobile
+
     for f in ('full_name', 'mobile', 'email', 'rank_id', 'is_active', 'branch_id'):
         if f in data:
             setattr(a, f, data[f])

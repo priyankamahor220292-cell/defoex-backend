@@ -3,7 +3,7 @@ from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from models.branch import Branch
 from models.branch_wallet import BranchWallet, WalletTransaction, AdminWallet, ADMIN_WALLET_LIMIT
 from extensions import db
-from utils.helpers import success_response, error_response
+from utils.helpers import success_response, error_response, normalize_mobile, validate_branch_manager_mobile
 from utils.datetime_utils import now_ist, isoformat_ist
 from utils.role_scoping import branch_access_error, should_hide_branch
 from sqlalchemy import text
@@ -112,11 +112,19 @@ def create_branch():
     if not branch_code or not branch_name:
         return jsonify(error_response('Branch code and name are required', 400)[0]), 400
 
+    manager_mobile = (data.get('manager_mobile') or '').strip()
+    if manager_mobile:
+        mobile_err = validate_branch_manager_mobile(manager_mobile)
+        if mobile_err:
+            return jsonify(error_response(mobile_err, 409)[0]), 409
+
     allowed = ['branch_code', 'branch_name', 'address', 'city', 'state', 'pincode',
                'manager_name', 'manager_email', 'manager_mobile', 'is_active']
     branch = Branch(**{k: v for k, v in data.items() if k in allowed})
     branch.branch_code = branch_code.upper()
     branch.branch_name = branch_name
+    if manager_mobile:
+        branch.manager_mobile = normalize_mobile(manager_mobile) or manager_mobile
 
     try:
         db.session.add(branch)

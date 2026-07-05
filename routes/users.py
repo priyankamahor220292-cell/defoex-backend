@@ -8,7 +8,10 @@ from models.member import Member
 from models.investment import Investment
 from models.branch_wallet import WalletTransaction
 from extensions import db
-from utils.helpers import success_response, error_response
+from utils.helpers import (
+    success_response, error_response, normalize_mobile,
+    validate_branch_manager_mobile, validate_adviser_mobile, validate_investor_mobile,
+)
 
 users_bp = Blueprint('users', __name__, url_prefix='/api/users')
 
@@ -20,6 +23,34 @@ def _require_superadmin():
     if claims.get('role') != 'superadmin':
         return jsonify(error_response('Unauthorized', 403)[0]), 403
     return None
+
+
+def _linked_member_id(user):
+    if user.role != 'member':
+        return None
+    username = (user.username or '').strip().upper()
+    member = None
+    if username:
+        member = Member.query.filter(
+            db.func.upper(Member.investor_id) == username
+        ).first()
+    if not member and user.mobile:
+        member = Member.query.filter_by(mobile=user.mobile).first()
+    return member.id if member else None
+
+
+def _linked_adviser_id(user):
+    if user.role != 'advisor':
+        return None
+    username = (user.username or '').strip().upper()
+    adviser = None
+    if username:
+        adviser = Adviser.query.filter(
+            db.func.upper(Adviser.adviser_code) == username
+        ).first()
+    if not adviser and user.mobile:
+        adviser = Adviser.query.filter_by(mobile=user.mobile).first()
+    return adviser.id if adviser else None
 
 
 def _sync_adviser_login(user, old_username=None):
@@ -130,11 +161,28 @@ def create_user():
     if role == 'branchmanager' and not data.get('branch_id'):
         return jsonify(error_response('Branch is required for branch manager accounts')[0]), 400
 
+    mobile = normalize_mobile(data.get('mobile'))
+    if role == 'branchmanager':
+        mobile_err = validate_branch_manager_mobile(
+            data.get('mobile'),
+            exclude_branch_id=data.get('branch_id'),
+        )
+        if mobile_err:
+            return jsonify(error_response(mobile_err, 409)[0]), 409
+    elif role == 'advisor' and data.get('mobile'):
+        mobile_err = validate_adviser_mobile(mobile, allow_approved_investor=True)
+        if mobile_err:
+            return jsonify(error_response(mobile_err, 409)[0]), 409
+    elif role == 'member' and data.get('mobile'):
+        mobile_err = validate_investor_mobile(mobile)
+        if mobile_err:
+            return jsonify(error_response(mobile_err, 409)[0]), 409
+
     user = User(
         username=username,
         email=email,
         full_name=data['full_name'],
-        mobile=data.get('mobile'),
+        mobile=mobile if role in ('branchmanager', 'advisor', 'member') and mobile else data.get('mobile'),
         role=role,
         branch_id=data.get('branch_id'),
     )
@@ -175,6 +223,40 @@ def update_user(user_id):
     if user.role == 'branchmanager' and 'branch_id' in data and not data.get('branch_id'):
         return jsonify(error_response('Branch is required for branch manager accounts')[0]), 400
 
+    if user.role == 'branchmanager' and 'mobile' in data:
+        branch_id = data.get('branch_id', user.branch_id)
+        mobile_err = validate_branch_manager_mobile(
+            data.get('mobile'),
+            exclude_user_id=user.id,
+            exclude_branch_id=branch_id,
+        )
+        if mobile_err:
+            return jsonify(error_response(mobile_err, 409)[0]), 409
+    elif user.role == 'advisor' and 'mobile' in data:
+        linked_member_id = None
+        adviser_id = _linked_adviser_id(user)
+        if adviser_id:
+            adviser = Adviser.query.get(adviser_id)
+            if adviser and adviser.investor_id:
+                linked = Member.query.filter_by(investor_id=adviser.investor_id).first()
+                if linked:
+                    linked_member_id = linked.id
+        mobile_err = validate_adviser_mobile(
+            data.get('mobile'),
+            exclude_adviser_id=adviser_id,
+            exclude_member_id=linked_member_id,
+            allow_approved_investor=bool(linked_member_id),
+        )
+        if mobile_err:
+            return jsonify(error_response(mobile_err, 409)[0]), 409
+    elif user.role == 'member' and 'mobile' in data:
+        mobile_err = validate_investor_mobile(
+            data.get('mobile'),
+            exclude_member_id=_linked_member_id(user),
+        )
+        if mobile_err:
+            return jsonify(error_response(mobile_err, 409)[0]), 409
+
     if 'username' in data:
         username = (data.get('username') or '').strip()
         if not username:
@@ -201,7 +283,11 @@ def update_user(user_id):
 
     for field in ['full_name', 'mobile', 'branch_id', 'is_active']:
         if field in data:
-            setattr(user, field, data[field])
+            if field == 'mobile' and data[field]:
+                value = normalize_mobile(data[field])
+            else:
+                value = data[field]
+            setattr(user, field, value)
 
     if wants_profile_edit:
         if user.role == 'advisor':

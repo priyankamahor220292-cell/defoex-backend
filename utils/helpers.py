@@ -93,26 +93,166 @@ def normalize_mobile(mobile):
     return digits[-10:] if len(digits) >= 10 else digits
 
 
-def find_member_by_mobile(mobile):
+def find_member_by_mobile(mobile, exclude_member_id=None):
     from models.member import Member
     norm = normalize_mobile(mobile)
     if not norm:
         return None
     for member in Member.query.filter(Member.mobile.isnot(None)).all():
+        if exclude_member_id and member.id == exclude_member_id:
+            continue
         if normalize_mobile(member.mobile) == norm:
             return member
     return None
 
 
-def find_adviser_by_mobile(mobile):
+def find_adviser_by_mobile(mobile, exclude_adviser_id=None):
     from models.adviser import Adviser
     norm = normalize_mobile(mobile)
     if not norm:
         return None
     for adviser in Adviser.query.filter(Adviser.mobile.isnot(None)).all():
+        if exclude_adviser_id and adviser.id == exclude_adviser_id:
+            continue
         if normalize_mobile(adviser.mobile) == norm:
             return adviser
     return None
+
+
+def find_branch_manager_user_by_mobile(mobile, exclude_user_id=None):
+    """Find a branch manager portal user by normalized mobile."""
+    from models.user import User
+    norm = normalize_mobile(mobile)
+    if not norm:
+        return None
+    q = User.query.filter(User.role == 'branchmanager', User.mobile.isnot(None))
+    if exclude_user_id:
+        q = q.filter(User.id != exclude_user_id)
+    for user in q.all():
+        if normalize_mobile(user.mobile) == norm:
+            return user
+    return None
+
+
+def find_branch_by_manager_mobile(mobile, exclude_branch_id=None):
+    """Find a branch whose manager_mobile matches (normalized)."""
+    from models.branch import Branch
+    norm = normalize_mobile(mobile)
+    if not norm:
+        return None
+    q = Branch.query.filter(Branch.manager_mobile.isnot(None))
+    if exclude_branch_id:
+        q = q.filter(Branch.id != exclude_branch_id)
+    for branch in q.all():
+        if normalize_mobile(branch.manager_mobile) == norm:
+            return branch
+    return None
+
+
+def _branch_manager_mobile_conflict(mobile, exclude_user_id=None, exclude_branch_id=None):
+    """Shared branch-manager uniqueness checks. Returns error message or None."""
+    existing_user = find_branch_manager_user_by_mobile(mobile, exclude_user_id=exclude_user_id)
+    if existing_user:
+        label = existing_user.full_name or existing_user.username or f'ID {existing_user.id}'
+        return f'Mobile number already registered to branch manager {label}'
+
+    existing_branch = find_branch_by_manager_mobile(mobile, exclude_branch_id=exclude_branch_id)
+    if existing_branch:
+        return (
+            f'Mobile number already used for branch '
+            f'{existing_branch.branch_name} ({existing_branch.branch_code})'
+        )
+    return None
+
+
+def validate_investor_mobile(mobile, exclude_member_id=None):
+    """
+    Investor mobiles must be unique among investors, advisers, and branch managers.
+    Returns None if valid, else an error message.
+    """
+    norm = normalize_mobile(mobile)
+    if not norm:
+        return 'Mobile number is required'
+    if len(norm) != 10:
+        return 'Valid 10-digit mobile number is required'
+
+    existing = find_member_by_mobile(mobile, exclude_member_id=exclude_member_id)
+    if existing:
+        return f'Mobile number already registered as investor {existing.investor_id}'
+
+    adviser = find_adviser_by_mobile(mobile)
+    if adviser:
+        return f'Mobile number already registered as adviser {adviser.adviser_code}'
+
+    return _branch_manager_mobile_conflict(mobile)
+
+
+def validate_adviser_mobile(
+    mobile,
+    exclude_adviser_id=None,
+    exclude_member_id=None,
+    allow_approved_investor=False,
+    exclude_user_id=None,
+    exclude_branch_id=None,
+):
+    """
+    Adviser mobiles must be unique among advisers and branch managers.
+    Approved investors may reuse their mobile when promoted to adviser.
+    Returns None if valid, else an error message.
+    """
+    norm = normalize_mobile(mobile)
+    if not norm:
+        return 'Mobile number is required'
+    if len(norm) != 10:
+        return 'Valid 10-digit mobile number is required'
+
+    existing = find_adviser_by_mobile(mobile, exclude_adviser_id=exclude_adviser_id)
+    if existing:
+        return f'Mobile number already registered as adviser {existing.adviser_code}'
+
+    member = find_member_by_mobile(mobile, exclude_member_id=exclude_member_id)
+    if member:
+        if allow_approved_investor and member.approval_status == 'Approved':
+            pass
+        elif member.approval_status == 'Pending':
+            return f'Mobile number already registered as pending investor {member.investor_id}'
+        else:
+            return f'Mobile number already registered as investor {member.investor_id}'
+
+    return _branch_manager_mobile_conflict(
+        mobile,
+        exclude_user_id=exclude_user_id,
+        exclude_branch_id=exclude_branch_id,
+    )
+
+
+def validate_branch_manager_mobile(mobile, exclude_user_id=None, exclude_branch_id=None):
+    """
+    Branch manager mobiles must be unique across branch manager users
+    and branch.manager_mobile fields.
+    Returns None if valid, else an error message.
+    """
+    norm = normalize_mobile(mobile)
+    if not norm:
+        return 'Mobile number is required for branch managers'
+    if len(norm) != 10:
+        return 'Valid 10-digit mobile number is required'
+
+    existing = find_adviser_by_mobile(mobile)
+    if existing:
+        return f'Mobile number already registered as adviser {existing.adviser_code}'
+
+    existing = find_member_by_mobile(mobile)
+    if existing:
+        return f'Mobile number already registered as investor {existing.investor_id}'
+
+    return _branch_manager_mobile_conflict(
+        mobile,
+        exclude_user_id=exclude_user_id,
+        exclude_branch_id=exclude_branch_id,
+    )
+
+
 def calculate_age(dob):
     if not dob:
         return None

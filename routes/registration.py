@@ -7,7 +7,7 @@ from extensions import db
 from utils.helpers import (
     generate_investor_id, calculate_age,
     success_response, error_response, paginate_query,
-    normalize_mobile, find_member_by_mobile,
+    normalize_mobile, validate_investor_mobile,
 )
 from utils.role_scoping import scope_members, current_role, current_adviser, sanitize_response
 from utils.member_lookup import find_promoter_adviser
@@ -131,11 +131,9 @@ def new_registration():
     if not mobile or len(mobile) != 10:
         return jsonify(error_response('Valid 10-digit mobile number is required')[0]), 400
 
-    existing_member = find_member_by_mobile(mobile)
-    if existing_member:
-        return jsonify(error_response(
-            f'Mobile number already registered as investor {existing_member.investor_id}'
-        )[0]), 409
+    mobile_err = validate_investor_mobile(mobile)
+    if mobile_err:
+        return jsonify(error_response(mobile_err, 409)[0]), 409
     if data.get('aadhar_number') and Member.query.filter_by(aadhar_number=str(data['aadhar_number'])).first():
         return jsonify(error_response('Aadhar number already registered')[0]), 409
 

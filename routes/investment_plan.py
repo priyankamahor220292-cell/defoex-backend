@@ -1462,7 +1462,7 @@ def investment_receipt(irn):
             'receipt_no': _generate_receipt_no(investment, paid),
             'receipt_date': _fmt_receipt_date(receipt_date),
             'receipt_date_iso': receipt_date.isoformat() if hasattr(receipt_date, 'isoformat') else str(receipt_date),
-            'company_name': 'DEFOEX INTRATECH PRIVATE LIMITED',
+            'company_name': 'DEFOEX INFRATECH PRIVATE LIMITED',
             'document_title': 'INVESTMENT RECEIPT',
             'investment_id': investment.irn,
             'investor_id': member.investor_id,
