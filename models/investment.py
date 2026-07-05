@@ -15,7 +15,9 @@ MIS_PLANS = {
     '7Y': {'months': 84, 'roi_num': 19, 'roi_den': 14, 'label': 'MIS 7 Year', 'roi_pct': '35.71', 'roi_display': '35.71%'},
 }
 
-# Official MIS monthly installment amounts — from company rate chart
+# Official MIS monthly installment amounts — ₹100 to ₹30,000 per month
+MIS_MIN_AMOUNT = 100
+MIS_MAX_AMOUNT = 30000
 MIS_AMOUNTS = [
     100, 200, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000,
     5000, 6000, 7500, 9000, 10000, 12000, 15000, 20000, 25000, 30000,
@@ -64,6 +66,27 @@ SIS_REF = [
     (600000,  1200000), (700000,  1400000), (800000,  1600000),
     (900000,  1800000), (1000000, 2000000),
 ]
+
+SIS_AMOUNTS = [inv for inv, _ in SIS_REF]
+
+
+def sis_rate_chart():
+    """Official SIS 7.5Y chart — maturity is double the investment."""
+    return [
+        {
+            'investment_amount': inv,
+            'maturity_amount': mat,
+            'roi_display': '100%',
+        }
+        for inv, mat in SIS_REF
+    ]
+
+
+def tenure_display(plan_type, plan_tenure):
+    """Human-readable tenure (SIS stored as 7Y in DB → 7.5Y)."""
+    if plan_type == 'SIS':
+        return '7.5Y'
+    return plan_tenure or ''
 
 
 class Investment(db.Model):
@@ -131,7 +154,10 @@ class Investment(db.Model):
             roi_display = f"{roi_pct:.2f}%" if roi_pct else MIS_PLANS.get(self.plan_tenure, {}).get('roi_display')
         except Exception:
             roi_pct     = None
-            roi_display = MIS_PLANS.get(self.plan_tenure, {}).get('roi_display')
+            if self.plan_type == 'SIS':
+                roi_display = SIS_PLANS['7.5Y']['roi_display']
+            else:
+                roi_display = MIS_PLANS.get(self.plan_tenure, {}).get('roi_display')
 
         paid = self.installments_paid or 0
         total_inst = self.total_installments or 0
@@ -147,6 +173,7 @@ class Investment(db.Model):
             'branch_id':               self.branch_id,
             'plan_type':               self.plan_type,
             'plan_tenure':             self.plan_tenure,
+            'plan_tenure_display':     tenure_display(self.plan_type, self.plan_tenure),
             'plan_name':               self.plan_name,
             'investment_date':         self.investment_date.isoformat() if self.investment_date else None,
             'due_date':                self.due_date.isoformat() if self.due_date else None,

@@ -5,8 +5,8 @@ Routes for: MIS Plan, SIS Plan, MIS Contribution, Approve Investment
 Fixes & Features in this version:
   1. get-investor-details → accepts investor_id OR adviser_id
      AND accepts status == 'approved' OR 'active'
-  2. MIS monthly amount must be one of the official chart amounts (₹100–₹30,000)
-  3. SIS lump sum must be a multiple of ₹1,000 (min ₹1,000)
+  2. MIS monthly amount: official chart ₹100–₹30,000 per month
+  3. SIS lump sum must be ₹5,000–₹10,00,000 (multiple of ₹1,000); maturity doubles
   3. UPI payment: transaction_id (alphanumeric, max 35 chars) + upi_app
      stored when payment_mode == 'UPI'
   4. Cash payment: no extra fields required
@@ -21,7 +21,10 @@ from dateutil.relativedelta import relativedelta
 import re
 
 from extensions import db
-from models.investment import Investment, Installment, MIS_PLANS, MIS_AMOUNTS, SIS_PLANS, mis_rate_chart
+from models.investment import (
+    Investment, Installment, MIS_PLANS, MIS_AMOUNTS, MIS_MIN_AMOUNT, MIS_MAX_AMOUNT,
+    SIS_PLANS, SIS_REF, mis_rate_chart, sis_rate_chart, SIS_AMOUNTS,
+)
 from models.commission import Commission
 from models.member import Member
 from models.adviser import Adviser
@@ -45,7 +48,8 @@ investment_plan_bp = Blueprint('investment_plan', __name__, url_prefix='/api/inv
 # ─── Constants ───────────────────────────────────────────────────────────────
 VALID_UPI_APPS = {'phonepe', 'paytm', 'gpay', 'googlepay', 'bhim', 'other'}
 TRANSACTION_ID_RE = re.compile(r'^[A-Za-z0-9]{1,35}$')
-MIN_SIS_AMOUNT = Decimal('1000')
+MIN_SIS_AMOUNT = Decimal('5000')
+MAX_SIS_AMOUNT = Decimal('1000000')
 MIS_AMOUNT_SET = {Decimal(str(a)) for a in MIS_AMOUNTS}
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -73,18 +77,23 @@ def _validate_mis_amount(amount_raw):
 
 def _validate_sis_amount(amount_raw):
     """
-    Validate SIS lump-sum amount (multiple of ₹1,000, min ₹1,000).
+    Validate SIS lump-sum amount (₹5,000–₹10,00,000, multiples of ₹1,000).
     Returns (Decimal, None) on success or (None, error_str) on failure.
     """
     try:
         amount = Decimal(str(amount_raw))
         if amount <= 0:
             raise ValueError
+        if amount != int(amount):
+            raise ValueError
     except (TypeError, ValueError, InvalidOperation):
-        return None, 'Amount must be a positive number'
+        return None, 'Amount must be a positive whole number'
 
     if amount < MIN_SIS_AMOUNT:
-        return None, 'Minimum SIS investment amount is ₹1,000'
+        return None, 'Minimum SIS investment amount is ₹5,000'
+
+    if amount > MAX_SIS_AMOUNT:
+        return None, 'Maximum SIS investment amount is ₹10,00,000'
 
     if amount % 1000 != 0:
         return None, 'SIS amount must be a multiple of ₹1,000 (e.g. ₹5,000 / ₹10,000)'
@@ -135,13 +144,69 @@ def _require_plan_admin():
 
 
 def _require_superadmin():
-    """Only superadmin may delete investment plans."""
+    """Only superadmin may CRUD investment plans (view, update, delete)."""
     if current_role() != 'superadmin':
         return jsonify({
             'success': False,
-            'message': 'Unauthorized — only admin can delete investment plans',
+            'message': 'Unauthorized — only admin can manage investment plans',
         }), 403
     return None
+
+
+def _investment_detail(investment):
+    """Full plan payload for admin read/update."""
+    items = _enrich_investment_items([investment])
+    detail = items[0] if items else investment.to_dict()
+
+    member = Member.query.filter_by(investor_id=investment.investor_id).first()
+    if member:
+        detail['investor_name'] = member.full_name
+        detail['investor_mobile'] = member.mobile
+
+    detail['installments'] = [
+        i.to_dict() for i in Installment.query.filter_by(investment_id=investment.id)
+        .order_by(Installment.installment_number).all()
+    ]
+    return detail
+
+
+def _recalculate_mis_plan(investment, amount, tenure, investment_date=None):
+    plan_info = MIS_PLANS[tenure]
+    months = plan_info['months']
+    total_investment = amount * months
+    maturity = (total_investment * plan_info['roi_num'] / plan_info['roi_den']).to_integral_value(
+        rounding=ROUND_HALF_UP
+    )
+    inv_date = investment_date or investment.investment_date or today_ist()
+
+    investment.plan_tenure = tenure
+    investment.plan_type = 'MIS'
+    investment.monthly_amount = float(amount)
+    investment.total_installments = months
+    investment.total_investment_amount = float(total_investment)
+    investment.total_maturity_amount = float(maturity)
+    investment.roi_percentage = float(plan_info['roi_pct'])
+    investment.plan_name = plan_info['label']
+    investment.investment_date = inv_date
+    investment.maturity_date = inv_date + relativedelta(months=months)
+    investment.due_date = inv_date + relativedelta(months=1)
+
+
+def _recalculate_sis_plan(investment, amount, investment_date=None):
+    inv_date = investment_date or investment.investment_date or today_ist()
+    maturity = (amount * 2).to_integral_value(rounding=ROUND_HALF_UP)
+
+    investment.plan_type = 'SIS'
+    investment.plan_tenure = '7Y'
+    investment.monthly_amount = float(amount)
+    investment.total_installments = 1
+    investment.total_investment_amount = float(amount)
+    investment.total_maturity_amount = float(maturity)
+    investment.roi_percentage = Decimal('100.00')
+    investment.plan_name = SIS_PLANS['7.5Y']['label']
+    investment.investment_date = inv_date
+    investment.maturity_date = inv_date + relativedelta(months=90)
+    investment.due_date = inv_date
 
 
 def _get_member_by_any_id(member_id: str):
@@ -353,7 +418,23 @@ def get_mis_chart():
         'data': {
             'plans': MIS_PLANS,
             'amounts': MIS_AMOUNTS,
+            'min_amount': MIS_MIN_AMOUNT,
+            'max_amount': MIS_MAX_AMOUNT,
             'rows': mis_rate_chart(),
+        },
+    }), 200
+
+
+@investment_plan_bp.route('/sis-chart', methods=['GET'])
+@jwt_required()
+def get_sis_chart():
+    """Return official SIS 7.5Y rate chart (lump sum → double at maturity)."""
+    return jsonify({
+        'success': True,
+        'data': {
+            'plan': SIS_PLANS['7.5Y'],
+            'amounts': SIS_AMOUNTS,
+            'rows': sis_rate_chart(),
         },
     }), 200
 
@@ -516,7 +597,7 @@ def _do_create_sis(data):
 
     JSON body:
       investor_id    : str
-      lump_amount    : int   (must be multiple of 1000, min 1000)
+      lump_amount    : int   (₹5,000–₹10,00,000, multiple of ₹1,000)
       payment_mode   : str   ('Cash' or 'UPI')
       transaction_id : str   (required if UPI)
       upi_app        : str   (required if UPI)
@@ -566,7 +647,7 @@ def _do_create_sis(data):
             branch_id               = branch.id,
             plan_type               = 'SIS',
             plan_tenure             = '7Y',
-            plan_name               = 'SIS 7.5 Year Plan',
+            plan_name               = plan_info['label'],
             monthly_amount          = float(amount),
             total_installments      = 1,
             total_investment_amount = float(amount),
@@ -850,6 +931,104 @@ def approve_investment(investment_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'success': False, 'message': f'Action failed: {str(e)}'}), 500
+
+
+@investment_plan_bp.route('/<int:investment_id>', methods=['GET'])
+@jwt_required()
+def get_investment(investment_id):
+    """Super Admin only — fetch a single investment plan with full details."""
+    denied = _require_superadmin()
+    if denied:
+        return denied
+
+    investment = Investment.query.get(investment_id)
+    if not investment:
+        return jsonify({'success': False, 'message': 'Investment not found'}), 404
+
+    return jsonify({'success': True, 'data': _investment_detail(investment)}), 200
+
+
+@investment_plan_bp.route('/<int:investment_id>', methods=['PUT'])
+@jwt_required()
+def update_investment(investment_id):
+    """Super Admin only — update an investment plan."""
+    denied = _require_superadmin()
+    if denied:
+        return denied
+
+    investment = Investment.query.get(investment_id)
+    if not investment:
+        return jsonify({'success': False, 'message': 'Investment not found'}), 404
+
+    data = request.get_json() or {}
+    is_pending = (investment.approval_status or '') == 'Pending'
+
+    try:
+        investment_date = None
+        if data.get('investment_date'):
+            try:
+                investment_date = datetime.strptime(data['investment_date'], '%Y-%m-%d').date()
+            except ValueError:
+                return jsonify({'success': False, 'message': 'Invalid investment_date (YYYY-MM-DD)'}), 400
+
+        if is_pending and ('monthly_amount' in data or 'plan_tenure' in data):
+            plan_type = (investment.plan_type or 'MIS').upper()
+            if plan_type == 'SIS':
+                amount, err = _validate_sis_amount(
+                    data.get('monthly_amount', investment.monthly_amount)
+                )
+                if err:
+                    return jsonify({'success': False, 'message': err}), 400
+                _recalculate_sis_plan(investment, amount, investment_date)
+            else:
+                tenure = (data.get('plan_tenure') or investment.plan_tenure or '3Y').strip().upper()
+                if tenure not in MIS_PLANS:
+                    return jsonify({'success': False, 'message': 'Invalid MIS tenure'}), 400
+                amount, err = _validate_mis_amount(
+                    data.get('monthly_amount', investment.monthly_amount)
+                )
+                if err:
+                    return jsonify({'success': False, 'message': err}), 400
+                _recalculate_mis_plan(investment, amount, tenure, investment_date)
+        elif investment_date:
+            investment.investment_date = investment_date
+            if investment.maturity_date and investment.investment_date:
+                months = investment.total_installments or 36
+                investment.maturity_date = investment_date + relativedelta(months=months)
+                investment.due_date = investment_date + relativedelta(months=1)
+
+        if 'payment_mode' in data:
+            investment.payment_mode = _normalize_payment_mode(data['payment_mode'])
+
+        if 'approval_status' in data:
+            status_val = (data['approval_status'] or '').strip().title()
+            if status_val not in ('Pending', 'Approved', 'Rejected'):
+                return jsonify({'success': False, 'message': 'Invalid approval_status'}), 400
+            investment.approval_status = status_val
+
+        if 'status' in data:
+            status_val = (data['status'] or '').strip().title()
+            if status_val not in ('Active', 'Completed', 'Cancelled'):
+                return jsonify({'success': False, 'message': 'Invalid status'}), 400
+            investment.status = status_val
+
+        if 'installments_paid' in data:
+            paid = int(data['installments_paid'])
+            total = investment.total_installments or 0
+            if paid < 0 or (total and paid > total):
+                return jsonify({'success': False, 'message': 'Invalid installments_paid'}), 400
+            investment.installments_paid = paid
+
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'message': 'Investment plan updated',
+            'data': _investment_detail(investment),
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Update failed: {str(e)}'}), 500
 
 
 @investment_plan_bp.route('/<int:investment_id>', methods=['DELETE'])

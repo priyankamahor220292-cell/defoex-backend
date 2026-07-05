@@ -12,7 +12,7 @@ from utils.helpers import success_response, error_response
 
 users_bp = Blueprint('users', __name__, url_prefix='/api/users')
 
-PORTAL_CRUD_ROLES = frozenset({'advisor', 'member'})
+PORTAL_CRUD_ROLES = frozenset({'advisor', 'member', 'branchmanager'})
 
 
 def _require_superadmin():
@@ -127,6 +127,9 @@ def create_user():
     if User.query.filter(db.func.lower(User.email) == email.lower()).first():
         return jsonify(error_response('Email already exists')[0]), 409
 
+    if role == 'branchmanager' and not data.get('branch_id'):
+        return jsonify(error_response('Branch is required for branch manager accounts')[0]), 400
+
     user = User(
         username=username,
         email=email,
@@ -166,8 +169,11 @@ def update_user(user_id):
 
     if wants_profile_edit and user.role not in PORTAL_CRUD_ROLES:
         return jsonify(error_response(
-            'Only advisor and investor login accounts can be edited here'
+            'Only branch manager, advisor, and investor accounts can be edited here'
         )[0]), 400
+
+    if user.role == 'branchmanager' and 'branch_id' in data and not data.get('branch_id'):
+        return jsonify(error_response('Branch is required for branch manager accounts')[0]), 400
 
     if 'username' in data:
         username = (data.get('username') or '').strip()
@@ -243,7 +249,7 @@ def reset_password(user_id):
 @users_bp.route('/<int:user_id>', methods=['DELETE'])
 @jwt_required()
 def delete_user(user_id):
-    """Super Admin only — delete advisor or investor portal login accounts."""
+    """Super Admin only — delete branch manager, advisor, or investor portal accounts."""
     denied = _require_superadmin()
     if denied:
         return denied
@@ -254,9 +260,9 @@ def delete_user(user_id):
     if str(user.id) == str(current_id):
         return jsonify(error_response('Cannot delete your own account')[0]), 400
 
-    if user.role not in ('advisor', 'member'):
+    if user.role not in PORTAL_CRUD_ROLES:
         return jsonify(error_response(
-            'Only advisor and investor login accounts can be deleted'
+            'Only branch manager, advisor, and investor accounts can be deleted'
         )[0]), 400
 
     Notification.query.filter_by(user_id=user.id).delete()
