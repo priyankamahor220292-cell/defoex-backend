@@ -114,7 +114,7 @@ RUN_USER="$(whoami)"
 
 sudo tee /etc/systemd/system/defoex.service >/dev/null <<EOF
 [Unit]
-Description=DefOex IntraTech Flask API
+Description=Defoex InfraTech Flask API
 After=network.target postgresql.service
 
 [Service]

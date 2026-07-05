@@ -2,11 +2,13 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from models.branch import Branch
 from models.branch_wallet import BranchWallet, WalletTransaction, AdminWallet, ADMIN_WALLET_LIMIT
+from models.member import Member
+from models.investment import Investment
 from extensions import db
 from utils.helpers import success_response, error_response, normalize_mobile, validate_branch_manager_mobile
-from utils.datetime_utils import now_ist, isoformat_ist
+from utils.datetime_utils import now_ist, isoformat_ist, today_ist
 from utils.role_scoping import branch_access_error, should_hide_branch
-from sqlalchemy import text
+from sqlalchemy import text, func
 import traceback
 
 branches_bp = Blueprint('branches', __name__, url_prefix='/api/branches')
@@ -52,6 +54,47 @@ def _ensure_admin_wallet():
         return AdminWallet.query.first()
 
 
+def _branch_stats_map(branch_ids):
+    """Per-branch investor count, active plans, and this-month business."""
+    if not branch_ids:
+        return {}
+    month_start = today_ist().replace(day=1)
+    stats = {bid: {'investor_count': 0, 'active_plans': 0, 'monthly_business': 0} for bid in branch_ids}
+
+    for bid, cnt in (
+        db.session.query(Member.branch_id, func.count(Member.id))
+        .filter(Member.approval_status == 'Approved', Member.branch_id.in_(branch_ids))
+        .group_by(Member.branch_id)
+        .all()
+    ):
+        if bid in stats:
+            stats[bid]['investor_count'] = int(cnt or 0)
+
+    for bid, cnt in (
+        db.session.query(Investment.branch_id, func.count(Investment.id))
+        .filter(Investment.approval_status == 'Approved', Investment.branch_id.in_(branch_ids))
+        .group_by(Investment.branch_id)
+        .all()
+    ):
+        if bid in stats:
+            stats[bid]['active_plans'] = int(cnt or 0)
+
+    for bid, total in (
+        db.session.query(Investment.branch_id, func.sum(Investment.monthly_amount))
+        .filter(
+            Investment.approval_status == 'Approved',
+            Investment.investment_date >= month_start,
+            Investment.branch_id.in_(branch_ids),
+        )
+        .group_by(Investment.branch_id)
+        .all()
+    ):
+        if bid in stats:
+            stats[bid]['monthly_business'] = float(total or 0)
+
+    return stats
+
+
 @branches_bp.route('/', methods=['GET'])
 @jwt_required()
 def list_branches():
@@ -62,19 +105,26 @@ def list_branches():
         if should_hide_branch(role):
             return jsonify(error_response('Unauthorized', 403)[0]), 403
 
-        q = Branch.query.filter_by(is_active=True)
+        q = Branch.query
+        if role != 'superadmin':
+            q = q.filter_by(is_active=True)
         if role == 'branchmanager':
             branch_id = claims.get('branch_id')
             if not branch_id:
                 return jsonify(success_response([])[0]), 200
             q = q.filter_by(id=int(branch_id))
 
-        branches = q.all()
+        branches = q.order_by(Branch.branch_name.asc()).all()
+        branch_ids = [b.id for b in branches]
+        stats_map = _branch_stats_map(branch_ids) if role == 'superadmin' else {}
+
         result = []
         for b in branches:
             d = b.to_dict()
             w = BranchWallet.query.filter_by(branch_id=b.id).first()
             d['wallet'] = w.to_dict() if w else None
+            if b.id in stats_map:
+                d.update(stats_map[b.id])
             result.append(d)
         return jsonify(success_response(result)[0]), 200
     except Exception as e:

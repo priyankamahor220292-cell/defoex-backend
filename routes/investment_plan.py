@@ -1,5 +1,5 @@
 """
-investment_plan.py  — DefOex IntraTech Backend
+investment_plan.py  — Defoex InfraTech Backend
 Routes for: MIS Plan, SIS Plan, MIS Contribution, Approve Investment
 
 Fixes & Features in this version:

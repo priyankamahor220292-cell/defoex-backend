@@ -172,16 +172,24 @@ def create_adviser():
         return jsonify(error_response('Valid 12-digit Aadhar number is required')[0]), 400
 
     if not parent_code:
-        return jsonify(error_response('Promoter Adviser ID is required')[0]), 400
+        field_advisers = Adviser.query.filter_by(is_company_owner=False, is_active=True).count()
+        if claims.get('role') == 'superadmin' and field_advisers == 0:
+            if rank_id <= 0 or rank_id > 19:
+                return jsonify(error_response(
+                    'Select a valid rank (1–19) for the first field adviser'
+                )[0]), 400
+            promoter = None
+        else:
+            return jsonify(error_response('Promoter Adviser ID is required')[0]), 400
+    else:
+        promoter, promoter_err = find_promoter_adviser(parent_code)
+        if promoter_err:
+            return jsonify(error_response(promoter_err)[0]), 400
+        parent_code = promoter.adviser_code
 
-    promoter, promoter_err = find_promoter_adviser(parent_code)
-    if promoter_err:
-        return jsonify(error_response(promoter_err)[0]), 400
-    parent_code = promoter.adviser_code
-
-    rank_err = validate_assigned_rank(promoter.rank_id, rank_id)
-    if rank_err:
-        return jsonify(error_response(rank_err)[0]), 400
+        rank_err = validate_assigned_rank(promoter.rank_id, rank_id)
+        if rank_err:
+            return jsonify(error_response(rank_err)[0]), 400
 
     mobile_err = validate_adviser_mobile(mobile, allow_approved_investor=True)
     if mobile_err:
@@ -200,10 +208,14 @@ def create_adviser():
         note = f'New adviser created with code {code}.'
 
     reg_payload = {k: v for k, v in data.items() if v is not None}
-    reg_payload['promoter_adviser_id'] = parent_code
-    reg_payload['promoter_name'] = promoter.full_name
-    reg_payload['promoter_rank'] = promoter.rank_name
-    reg_payload['promoter_rank_id'] = promoter.rank_id
+    if promoter:
+        reg_payload['promoter_adviser_id'] = parent_code
+        reg_payload['promoter_name'] = promoter.full_name
+        reg_payload['promoter_rank'] = promoter.rank_name
+        reg_payload['promoter_rank_id'] = promoter.rank_id
+    else:
+        reg_payload['promoter_adviser_id'] = None
+        reg_payload['first_field_adviser'] = True
 
     try:
         adviser = Adviser(

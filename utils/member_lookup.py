@@ -309,6 +309,26 @@ def _def_ad_equiv(code, from_prefix, to_prefix):
     return None
 
 
+def _is_company_owner_adviser(adviser):
+    return bool(adviser and getattr(adviser, 'is_company_owner', False))
+
+
+def _company_owner_promoter_error(code=None):
+    label = (code or 'Company code').strip().upper()
+    return (
+        f'{label} is the internal company code and cannot be used as a Promoter Adviser ID. '
+        f'Enter an approved field adviser code (DEFAD...) instead.'
+    )
+
+
+def _promoter_adviser_query():
+    """Active advisers eligible as promoter (excludes company owner)."""
+    return Adviser.query.filter(
+        Adviser.is_active == True,
+        Adviser.is_company_owner == False,
+    )
+
+
 def find_promoter_adviser(raw_code):
     """
     Resolve promoter adviser for downline registration.
@@ -323,7 +343,7 @@ def find_promoter_adviser(raw_code):
     if 'DFX-IRN-' in code:
         return None, (
             'That is an Investment Bond number, not an adviser code. '
-            'Use an Adviser ID such as DEFAD202601.'
+            'Use an approved field adviser ID (DEFAD...).'
         )
 
     adviser, _user = find_adviser_identity(code)
@@ -355,6 +375,8 @@ def find_promoter_adviser(raw_code):
             if alt_code:
                 alt_adviser, _user = find_adviser_identity(alt_code)
                 if alt_adviser:
+                    if _is_company_owner_adviser(alt_adviser):
+                        return None, _company_owner_promoter_error(alt_code)
                     adviser = alt_adviser
 
     if not adviser:
@@ -367,18 +389,31 @@ def find_promoter_adviser(raw_code):
                     f'"{code}" is Investor ID format (DEFIN...). '
                     f'Promoter field requires Adviser ID (DEFAD...). Try: {alt}.'
                 )
-                sample = Adviser.query.filter(
+                sample = _promoter_adviser_query().filter(
                     db.func.upper(Adviser.adviser_code) == alt,
-                    Adviser.is_active == True,
                 ).first()
                 if sample:
                     return sample, None
-        sample = Adviser.query.filter_by(is_active=True).order_by(Adviser.id.desc()).limit(5).all()
+                owner = Adviser.query.filter(
+                    db.func.upper(Adviser.adviser_code) == alt,
+                    Adviser.is_company_owner == True,
+                ).first()
+                if owner:
+                    return None, _company_owner_promoter_error(alt)
+        sample = (
+            _promoter_adviser_query()
+            .order_by(Adviser.id.desc())
+            .limit(5)
+            .all()
+        )
         if sample and not code.startswith('DEFIN'):
             msg += ' Active adviser codes: ' + ', '.join(a.adviser_code for a in sample) + '.'
         elif hints and not code.startswith('DEFIN'):
             msg += f' Available DEFAD IDs: {", ".join(hints)}.'
         return None, msg
+
+    if _is_company_owner_adviser(adviser):
+        return None, _company_owner_promoter_error(adviser.adviser_code)
 
     if getattr(adviser, 'is_blacklisted', False):
         return None, f'Adviser {adviser.full_name} ({adviser.adviser_code}) is blacklisted.'
@@ -393,14 +428,20 @@ def find_promoter_adviser(raw_code):
 
 
 def defad_id_suggestions(limit=5):
-    """Recent DEFAD login / adviser IDs in this database (for error hints)."""
+    """Recent DEFAD login / adviser IDs eligible as promoter (excludes company owner)."""
     codes = set()
     for row in User.query.filter(User.username.ilike('DEFAD%')).order_by(User.id.desc()).limit(20):
         codes.add(row.username.upper())
-    for row in Adviser.query.filter(Adviser.login_username.isnot(None)).order_by(Adviser.id.desc()).limit(20):
+    for row in Adviser.query.filter(
+        Adviser.login_username.isnot(None),
+        Adviser.is_company_owner == False,
+    ).order_by(Adviser.id.desc()).limit(20):
         if row.login_username:
             codes.add(row.login_username.upper())
-    for row in Adviser.query.filter(Adviser.adviser_code.ilike('DEFAD%')).order_by(Adviser.id.desc()).limit(20):
+    for row in Adviser.query.filter(
+        Adviser.adviser_code.ilike('DEFAD%'),
+        Adviser.is_company_owner == False,
+    ).order_by(Adviser.id.desc()).limit(20):
         codes.add(row.adviser_code.upper())
     return sorted(codes, reverse=True)[:limit]
 

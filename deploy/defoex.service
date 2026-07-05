@@ -1,5 +1,5 @@
 [Unit]
-Description=DefOex IntraTech Flask API
+Description=Defoex InfraTech Flask API
 After=network.target postgresql.service
 
 [Service]

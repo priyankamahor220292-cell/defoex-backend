@@ -57,7 +57,7 @@ def create_app():
 
     @app.route('/health')
     def health():
-        return jsonify({'status': 'ok', 'app': 'DefOex IntraTech API v1.0', 'db': 'PostgreSQL'})
+        return jsonify({'status': 'ok', 'app': 'Defoex InfraTech API v1.0', 'db': 'PostgreSQL'})
 
     # Create tables and seed only if tables are empty
     with app.app_context():

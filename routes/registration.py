@@ -336,10 +336,30 @@ def list_investors():
         paginated = query.order_by(Member.date_of_joining.desc()).paginate(
             page=page, per_page=20, error_out=False)
 
+        scoped = scope_members(Member.query)
+        active_investor_ids = db.session.query(Investment.investor_id).filter(
+            Investment.approval_status == 'Approved'
+        ).distinct()
+        summary = {
+            'total': scoped.filter_by(approval_status='Approved').count(),
+            'active': scoped.filter(
+                Member.approval_status == 'Approved',
+                Member.investor_id.in_(active_investor_ids),
+            ).count(),
+            'pending': scoped.filter_by(approval_status='Pending').count(),
+            'blacklisted': scoped.filter(Member.approval_status == 'Rejected').count(),
+        }
+
+        adviser_names = {}
+        if paginated.items:
+            codes = {m.adviser_code for m in paginated.items if m.adviser_code}
+            if codes:
+                for adv in Adviser.query.filter(Adviser.adviser_code.in_(codes)).all():
+                    adviser_names[adv.adviser_code] = adv.full_name
+
         items = []
         for m in paginated.items:
             try:
-                # Use a direct count instead of lazy load to avoid cascade issues
                 has_plan = Investment.query.filter_by(
                     investor_id=m.investor_id,
                     approval_status='Approved'
@@ -347,19 +367,23 @@ def list_investors():
             except Exception:
                 has_plan = False
 
+            is_blacklisted = (m.approval_status or '').lower() == 'rejected'
             items.append({
                 'id':             m.id,
                 'investor_id':    m.investor_id,
                 'full_name':      m.full_name,
+                'father_spouse_name': m.father_spouse_name,
                 'mobile':         m.mobile,
                 'email':          m.email,
                 'corr_city':      m.corr_city,
                 'corr_state':     m.corr_state,
                 'adviser_code':   m.adviser_code,
+                'adviser_name':   adviser_names.get(m.adviser_code),
                 'member_type':    m.member_type,
-                'date_of_joining':m.date_of_joining.isoformat() if m.date_of_joining else None,
-                'approval_status':m.approval_status,
-                'status':         'Active' if has_plan else 'Not Active',
+                'date_of_joining': m.date_of_joining.isoformat() if m.date_of_joining else None,
+                'approval_status': m.approval_status,
+                'is_blacklisted': is_blacklisted,
+                'status':         'Blacklisted' if is_blacklisted else ('Active' if has_plan else 'Not Active'),
             })
 
         return jsonify(success_response({
@@ -367,6 +391,7 @@ def list_investors():
             'total':        paginated.total,
             'pages':        paginated.pages,
             'current_page': paginated.page,
+            'summary':      summary,
         })[0]), 200
 
     except Exception as e:

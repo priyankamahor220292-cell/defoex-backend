@@ -1,5 +1,5 @@
 """
-utils/helpers.py — DefOex IntraTech
+utils/helpers.py — Defoex InfraTech
 
 ID Formats:
   Investor ID     : DEFIN202601   (DEFIN + year + 2-digit seq)
