@@ -1060,6 +1060,10 @@ def approve_investment(investment_id):
                 first_inst.status = 'Paid'
                 first_inst.paid_date = today_ist()
             investment.installments_paid = 1
+            if investment.plan_type == 'MIS':
+                investment.due_date = today_ist() + relativedelta(months=1)
+            elif first_inst:
+                investment.due_date = investment.maturity_date
 
             commissions = process_investment_commissions(investment)
 
